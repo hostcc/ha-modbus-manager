@@ -19,6 +19,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
+    DEFAULT_MAX_REGISTER_READ,
     DOMAIN,
     POST_WRITE_SETTLE_SECONDS,
     POST_WRITE_SETTLE_WINET_SECONDS,
@@ -1008,6 +1009,15 @@ class ModbusCoordinator(DataUpdateCoordinator):
                 processed_binary_sensors = self._process_entities_with_prefix(
                     binary_sensors, prefix, template_name, entity_id_strategy
                 )
+                batch_cap = template.get(
+                    "max_register_read", DEFAULT_MAX_REGISTER_READ
+                )
+                for entity in (
+                    *processed_registers,
+                    *processed_controls,
+                    *processed_binary_sensors,
+                ):
+                    entity["max_register_read"] = batch_cap
 
                 # Create device info dict for this device
                 device_entry_id = device.get(

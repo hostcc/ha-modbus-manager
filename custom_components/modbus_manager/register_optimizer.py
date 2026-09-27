@@ -11,8 +11,13 @@ from .modbus_utils import is_valid_modbus_address
 
 _LOGGER = ModbusManagerLogger(__name__)
 
-# Do not exceed Modbus specification for read register count
-_MAX_MODBUS_READ_REGISTERS = 125
+# Do not exceed Modbus specification for read register count (FC3/FC4)
+MAX_MODBUS_READ_REGISTERS = 125
+
+
+def clamp_max_register_read(value: int) -> int:
+    """Clamp a sequential batch size to 1..125 registers."""
+    return max(1, min(value, MAX_MODBUS_READ_REGISTERS))
 
 
 def _register_width_for_merge(reg: Dict[str, Any]) -> int:
@@ -83,10 +88,28 @@ class RegisterOptimizer:
             n = int(raw)
         except (TypeError, ValueError):
             n = DEFAULT_MAX_REGISTER_READ
-        self.max_read_size = max(1, min(n, _MAX_MODBUS_READ_REGISTERS))
+        self.max_read_size = clamp_max_register_read(n)
         _LOGGER.debug(
             "Register optimizer initialized with max_read_size: %d", self.max_read_size
         )
+
+    def _register_batch_cap(self, reg: Dict[str, Any]) -> int:
+        """Batch cap for one register. Missing or invalid values use the default."""
+        raw = reg.get("max_register_read")
+        if raw is None or isinstance(raw, bool):
+            return self.max_read_size
+        try:
+            return clamp_max_register_read(int(raw))
+        except (TypeError, ValueError):
+            return self.max_read_size
+
+    def _batch_cap(
+        self, current_registers: List[Dict[str, Any]], candidate: Dict[str, Any]
+    ) -> int:
+        """Strictest cap among the registers that would share this batch."""
+        caps = [self._register_batch_cap(reg) for reg in current_registers]
+        caps.append(self._register_batch_cap(candidate))
+        return min(caps)
 
     def optimize_registers(
         self, registers: List[Dict[str, Any]]
@@ -146,9 +169,10 @@ class RegisterOptimizer:
                     )
 
                     add_w = _register_width_for_merge(reg)
+                    batch_cap = self._batch_cap(current_range.registers, reg)
                     if (
                         address <= current_range.end_address + 1
-                        and current_range.register_count + add_w <= self.max_read_size
+                        and current_range.register_count + add_w <= batch_cap
                         and current_input_type
                         == reg_input_type  # Same input_type required
                         and slave_ids_match  # Same slave_id required
