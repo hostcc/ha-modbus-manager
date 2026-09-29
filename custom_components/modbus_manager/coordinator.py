@@ -1029,6 +1029,14 @@ class ModbusCoordinator(DataUpdateCoordinator):
                 processed_binary_sensors = self._process_entities_with_prefix(
                     binary_sensors, prefix, template_name, entity_id_strategy
                 )
+                # Cap lookup is by template name. The loader tags sensors only;
+                # controls and binary sensors need the same key on these copies.
+                for entity in (
+                    *processed_registers,
+                    *processed_controls,
+                    *processed_binary_sensors,
+                ):
+                    entity["template"] = template_name
 
                 # Create device info dict for this device
                 device_entry_id = device.get(
