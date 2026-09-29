@@ -37,11 +37,12 @@ def _register_width_for_merge(reg: Dict[str, Any]) -> int:
 
 @dataclass
 class RegisterRange:
-    """Represents a range of consecutive registers."""
+    """Represents one Modbus read request over consecutive registers."""
 
     start_address: int
     end_address: int
     registers: List[Dict[str, Any]]
+    max_read_size: int
 
     @property
     def count(self) -> int:
@@ -93,28 +94,38 @@ class RegisterOptimizer:
             "Register optimizer initialized with max_read_size: %d", self.max_read_size
         )
 
-    def _register_batch_cap(self, reg: Dict[str, Any]) -> int:
-        """Batch cap for one register. Missing or invalid values use the default."""
-        raw = reg.get("max_register_read")
-        if raw is None or isinstance(raw, bool):
-            return self.max_read_size
-        try:
-            return clamp_max_register_read(int(raw))
-        except (TypeError, ValueError):
-            return self.max_read_size
-
-    def _batch_cap(
-        self, current_registers: List[Dict[str, Any]], candidate: Dict[str, Any]
-    ) -> int:
-        """Strictest cap among the registers that would share this batch."""
-        caps = [self._register_batch_cap(reg) for reg in current_registers]
-        caps.append(self._register_batch_cap(candidate))
-        return min(caps)
+    def _open_range(
+        self,
+        reg: Dict[str, Any],
+        address: int,
+        end_address: int,
+        max_read_size: int,
+    ) -> RegisterRange:
+        """Open a Modbus read request limited to max_read_size registers."""
+        return RegisterRange(
+            start_address=address,
+            end_address=end_address,
+            registers=[reg],
+            max_read_size=max_read_size,
+        )
 
     def optimize_registers(
-        self, registers: List[Dict[str, Any]]
+        self,
+        registers: List[Dict[str, Any]],
+        max_read_size: int | None = None,
     ) -> List[RegisterRange]:
-        """Group registers into optimal reading ranges."""
+        """Group registers into optimal reading ranges.
+
+        max_read_size applies to every request in this call. When omitted, the
+        optimizer default is used. The instance default is left unchanged.
+        """
+        if max_read_size is None:
+            read_size = self.max_read_size
+        else:
+            try:
+                read_size = clamp_max_register_read(int(max_read_size))
+            except (TypeError, ValueError):
+                read_size = self.max_read_size
         try:
             if not registers:
                 return []
@@ -143,8 +154,8 @@ class RegisterOptimizer:
 
                 if current_range is None:
                     # Start new range
-                    current_range = RegisterRange(
-                        start_address=address, end_address=end_address, registers=[reg]
+                    current_range = self._open_range(
+                        reg, address, end_address, read_size
                     )
                 else:
                     # Check if register can be appended to current range
@@ -169,10 +180,10 @@ class RegisterOptimizer:
                     )
 
                     add_w = _register_width_for_merge(reg)
-                    batch_cap = self._batch_cap(current_range.registers, reg)
                     if (
                         address <= current_range.end_address + 1
-                        and current_range.register_count + add_w <= batch_cap
+                        and current_range.register_count + add_w
+                        <= current_range.max_read_size
                         and current_input_type
                         == reg_input_type  # Same input_type required
                         and slave_ids_match  # Same slave_id required
@@ -186,10 +197,8 @@ class RegisterOptimizer:
                     else:
                         # Finish current range and start new one
                         ranges.append(current_range)
-                        current_range = RegisterRange(
-                            start_address=address,
-                            end_address=end_address,
-                            registers=[reg],
+                        current_range = self._open_range(
+                            reg, address, end_address, read_size
                         )
 
             # Add last range
@@ -202,10 +211,11 @@ class RegisterOptimizer:
             _LOGGER.error("Error during register optimization: %s", str(e))
             # Fallback: Each register individually
             return [
-                RegisterRange(
-                    start_address=reg.get("address", 0),
-                    end_address=reg.get("address", 0) + (reg.get("count", 1) or 1) - 1,
-                    registers=[reg],
+                self._open_range(
+                    reg,
+                    reg.get("address", 0),
+                    reg.get("address", 0) + (reg.get("count", 1) or 1) - 1,
+                    read_size,
                 )
                 for reg in registers
             ]

@@ -50,7 +50,7 @@ from .modbus_utils import (
     registers_to_bytes,
 )
 from .performance_monitor import PerformanceMonitor
-from .register_optimizer import RegisterOptimizer
+from .register_optimizer import RegisterOptimizer, RegisterRange
 from .sunspec_utils import (
     calculate_sunspec_register_address,
     detect_sunspec_model_addresses,
@@ -132,6 +132,7 @@ class ModbusCoordinator(DataUpdateCoordinator):
         self.template_processor = None
         self.register_optimizer = RegisterOptimizer()
         self.performance_monitor = PerformanceMonitor()
+        self._template_batch_caps: Dict[str, int] = {}
 
         # Cache for processed entities (loaded once at startup, reused on every update)
         # Structured dict: {"sensors": [...], "controls": [...], "calculated": [...], "binary_sensors": [...]}
@@ -317,6 +318,23 @@ class ModbusCoordinator(DataUpdateCoordinator):
                 matches.append(register)
         return matches
 
+    def _optimize_register_reads(
+        self, registers: List[Dict[str, Any]]
+    ) -> List[RegisterRange]:
+        """Group registers by template batch cap, then optimize each group."""
+        grouped: Dict[int, List[Dict[str, Any]]] = {}
+        for reg in registers:
+            cap = self._template_batch_caps.get(
+                reg.get("template"), DEFAULT_MAX_REGISTER_READ
+            )
+            grouped.setdefault(cap, []).append(reg)
+        ranges = []
+        for cap, group in grouped.items():
+            ranges.extend(
+                self.register_optimizer.optimize_registers(group, max_read_size=cap)
+            )
+        return ranges
+
     async def _async_read_written_register(self, slave_id: int, address: int) -> None:
         """Read register(s) immediately after a control write (bypass scan_interval)."""
         if self._is_unloading or not hub_is_connected(self.hub):
@@ -332,7 +350,7 @@ class ModbusCoordinator(DataUpdateCoordinator):
             )
             return
 
-        optimized_ranges = self.register_optimizer.optimize_registers(registers)
+        optimized_ranges = self._optimize_register_reads(registers)
         for range_obj in optimized_ranges:
             try:
                 data = await self._read_register_range(range_obj)
@@ -407,9 +425,7 @@ class ModbusCoordinator(DataUpdateCoordinator):
                 return self.register_data
 
             # 3. Optimize reading (group consecutive registers)
-            optimized_ranges = self.register_optimizer.optimize_registers(
-                registers_to_read
-            )
+            optimized_ranges = self._optimize_register_reads(registers_to_read)
 
             # Calculate total bytes that will be transferred (2 bytes per register)
             total_bytes = sum(
@@ -605,6 +621,7 @@ class ModbusCoordinator(DataUpdateCoordinator):
         }
         """
         try:
+            self._template_batch_caps = {}
             # Initialize structured entity collections
             all_sensors = []
             all_controls = []
@@ -675,6 +692,9 @@ class ModbusCoordinator(DataUpdateCoordinator):
                 if not template:
                     _LOGGER.error("Template %s not found for device", template_name)
                     continue
+                self._template_batch_caps[template_name] = template.get(
+                    "max_register_read", DEFAULT_MAX_REGISTER_READ
+                )
 
                 # Build dynamic_config dict dynamically from template's dynamic_config section
                 # This automatically includes ALL fields defined in the template (e.g., dual_channel_meter)
@@ -1009,15 +1029,6 @@ class ModbusCoordinator(DataUpdateCoordinator):
                 processed_binary_sensors = self._process_entities_with_prefix(
                     binary_sensors, prefix, template_name, entity_id_strategy
                 )
-                batch_cap = template.get(
-                    "max_register_read", DEFAULT_MAX_REGISTER_READ
-                )
-                for entity in (
-                    *processed_registers,
-                    *processed_controls,
-                    *processed_binary_sensors,
-                ):
-                    entity["max_register_read"] = batch_cap
 
                 # Create device info dict for this device
                 device_entry_id = device.get(
