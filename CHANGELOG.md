@@ -7,14 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-10-02
+
 ### ✨ Added
 
-- **String sensors — hex encoding**: `data_type: string` with `encoding: hex` publishes the register bytes as lowercase hex (`123456789012` for bytes `\x12\x34\x56\x78\x90\x12`). Hex is read-only; a control that uses it raises an error.
-- **Template batch cap**: Optional top-level `max_register_read` limits how many sequential registers the optimizer merges into one Modbus read (default 64, maximum 125).
+- **String sensors — hex encoding ([#101](https://github.com/TCzerny/ha-modbus-manager/pull/101))**: `data_type: string` with `encoding: hex` publishes the register bytes as lowercase hex (`123456789012` for bytes `\x12\x34\x56\x78\x90\x12`). Hex is read-only; a control that uses it raises an error.
 
 ### 🐛 Fixed
 
-- **Entity icons**: Switches, buttons, text entities, and binary sensors now use the template `icon`. An explicit icon overrides the `device_class` icon.
+- **Sungrow SHx — PV generation hours today ([#102](https://github.com/TCzerny/ha-modbus-manager/issues/102))**: Divide daily kWh by DC power in **kW** (`total_dc_power` / 1000). Night/zero branch returns **0.0** so the recorder does not flip `0` / `0.0`. The metric is still “energy at current power”, not true hours today — documented as under review. `unique_id` unchanged. Template v1.2.22.
 
 ## [1.2.1] - 2026-09-30
 
