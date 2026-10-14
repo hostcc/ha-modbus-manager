@@ -18,6 +18,7 @@ from homeassistant.helpers import entity_registry as er
 from .combined_specs import resolve_combination_type
 from .const import (
     CONF_ENTRY_TYPE,
+    CONF_GENERIC_REGISTERS,
     DEFAULT_DELAY,
     DEFAULT_MESSAGE_WAIT_MS,
     DEFAULT_PORT,
@@ -27,6 +28,7 @@ from .const import (
     DOMAIN,
     ENTRY_TYPE_COMBINED_DEVICE,
     ENTRY_TYPE_HUB,
+    GENERIC_TEMPLATE_SENTINEL,
     MAX_POST_WRITE_SETTLE_MS,
     MIN_DELAY,
     MIN_MESSAGE_WAIT_MS,
@@ -55,6 +57,23 @@ from .device_utils import (
     updated_hub_entry_title,
 )
 from .dynamic_processing import process_dynamic_config
+from .generic_device import (
+    GenericRegisterError,
+    async_export_generic_device,
+    async_notify_generic_export,
+    generic_confirm_actions,
+    generic_device_template_label,
+    generic_entity_core_schema,
+    generic_entity_extras_schema,
+    generic_entity_type_label,
+    generic_entity_type_schema,
+    generic_opt_actions,
+    generic_opt_mode_label,
+    generic_row_form_defaults,
+    is_generic_device_template,
+    normalize_generic_register,
+    normalize_generic_registers,
+)
 from .hub_identify import IdentifyHit, async_identify_hub
 from .logger import ModbusManagerLogger
 from .template_loader import (
@@ -135,6 +154,71 @@ def _apply_post_write_settle_to_entry_data(
         hub["post_write_settle_milliseconds"] = milliseconds
 
 
+_TCP_RTU_MODBUS_TYPES = frozenset({"tcp", "rtuovertcp"})
+_MODBUS_TYPE_LABELS = {
+    "en": {
+        "tcp": "Modbus TCP",
+        "rtuovertcp": "Modbus RTU over TCP",
+        "serial": "Serial RTU",
+    },
+    "de": {
+        "tcp": "Modbus TCP",
+        "rtuovertcp": "Modbus RTU over TCP",
+        "serial": "Seriell RTU",
+    },
+}
+
+
+def _stored_modbus_type(entry_data: dict[str, Any]) -> str:
+    """Hub transport: tcp, rtuovertcp, or serial (not LAN/WiNet)."""
+    hub = entry_data.get("hub") if isinstance(entry_data.get("hub"), dict) else {}
+    raw = (
+        str(
+            entry_data.get("modbus_type")
+            or entry_data.get("type")
+            or hub.get("type")
+            or "tcp"
+        )
+        .strip()
+        .lower()
+    )
+    if raw in ("rtuovertcp", "rtu_over_tcp"):
+        return "rtuovertcp"
+    if raw in ("serial", "rtu"):
+        return "serial"
+    return "tcp"
+
+
+def _modbus_type_label(hass: HomeAssistant, modbus_type: str) -> str:
+    """Translated label for a stored hub transport."""
+    language = str(getattr(hass.config, "language", "en") or "en")
+    language = language.split("-", 1)[0].lower()
+    catalog = _MODBUS_TYPE_LABELS.get(language, _MODBUS_TYPE_LABELS["en"])
+    return catalog.get(modbus_type) or _MODBUS_TYPE_LABELS["en"].get(
+        modbus_type, modbus_type
+    )
+
+
+def _tcp_rtu_modbus_type_selector(hass: HomeAssistant) -> vol.In:
+    """TCP vs RTU-over-TCP radios (vol.In values are the visible labels)."""
+    language = str(getattr(hass.config, "language", "en") or "en")
+    language = language.split("-", 1)[0].lower()
+    catalog = _MODBUS_TYPE_LABELS.get(language, _MODBUS_TYPE_LABELS["en"])
+    return vol.In({key: catalog[key] for key in ("tcp", "rtuovertcp")})
+
+
+def _apply_modbus_type_to_entry_data(
+    entry_data: dict[str, Any], modbus_type: str
+) -> None:
+    """Persist hub transport without rewriting unrelated keys."""
+    entry_data["modbus_type"] = modbus_type
+    hub = entry_data.get("hub")
+    if isinstance(hub, dict):
+        hub = dict(hub)
+        hub["type"] = modbus_type
+        entry_data["hub"] = hub
+
+
 def _clamp_battery_config_for_connection(
     battery_config: Any, connection_type: Any
 ) -> str:
@@ -142,14 +226,103 @@ def _clamp_battery_config_for_connection(
 
     WiNet-S can use the separate SBR/SBH pack template (forwarded unit id).
     ``other`` is still remapped to ``standard_battery`` (inverter slave 1).
+    Pack template names (Options / Add device) must not be mapped to ``none``.
     """
     value = str(battery_config or "none").strip()
+    if not value:
+        return "none"
+    if _is_pack_template_selection(value):
+        return value
     if str(connection_type or "LAN").strip().upper() == "WINET":
         if value == "other":
             return "standard_battery"
         if value not in _WINET_BATTERY_CONFIGS:
             return "none"
     return value
+
+
+def _is_pack_template_selection(value: Any) -> bool:
+    """True when Options stored a battery YAML template name, not an inverter enum."""
+    text = str(value or "").strip()
+    return bool(text) and text not in _WINET_BATTERY_CONFIGS
+
+
+def _hub_battery_config_for_pack(selection: Any, connection_type: Any = None) -> str:
+    """Inverter-facing battery_config. Pack YAML name stays on battery_template."""
+    value = str(selection or "none").strip()
+    if value in ("none", ""):
+        return "none"
+    if value == "other":
+        return _clamp_battery_config_for_connection("other", connection_type)
+    if value == "standard_battery":
+        return "standard_battery"
+    return "sbr_battery"
+
+
+def _apply_hub_battery_from_pack_device(
+    entry_data: dict[str, Any], device: dict[str, Any]
+) -> None:
+    """Copy pack devices[] fields onto hub keys (Add device and Options)."""
+    template = str(device.get("template") or "").strip()
+    if not template or template in ("none", "other"):
+        return
+    entry_data["battery_template"] = template
+    prefix = device.get("prefix")
+    if prefix:
+        entry_data["battery_prefix"] = prefix
+    if device.get("slave_id") is not None:
+        entry_data["battery_slave_id"] = device.get("slave_id")
+    model = device.get("selected_model")
+    if model:
+        entry_data["battery_model"] = model
+    entry_data["battery_enabled"] = True
+    entry_data["battery_config"] = _hub_battery_config_for_pack(
+        template, entry_data.get("connection_type")
+    )
+
+
+def _apply_hub_keys_after_device_removed(
+    entry_data: dict[str, Any],
+    removed: dict[str, Any],
+    remaining: list[dict[str, Any]],
+) -> None:
+    """Keep hub-level keys consistent after dropping one devices[] row."""
+    role = resolve_device_role_type(removed)
+    if role == "battery":
+        entry_data["battery_template"] = "none"
+        entry_data["battery_config"] = "none"
+        entry_data["battery_enabled"] = False
+        return
+    if role in {"wallbox", "ev_charger"}:
+        still_has_charger = any(
+            resolve_device_role_type(device) in {"wallbox", "ev_charger"}
+            for device in remaining
+        )
+        if still_has_charger:
+            return
+        entry_data["wallbox_connected"] = False
+        for device in remaining:
+            if resolve_device_role_type(device) == "inverter":
+                device["wallbox_connected"] = False
+        return
+    if role != "inverter":
+        return
+    next_inverter = next(
+        (
+            device
+            for device in remaining
+            if resolve_device_role_type(device) == "inverter"
+        ),
+        None,
+    )
+    if not next_inverter:
+        return
+    if next_inverter.get("prefix"):
+        entry_data["prefix"] = next_inverter["prefix"]
+    if next_inverter.get("slave_id") is not None:
+        entry_data["slave_id"] = next_inverter["slave_id"]
+    if next_inverter.get("template"):
+        entry_data["template"] = next_inverter["template"]
 
 
 def _default_battery_slave_id(template_default: Any, connection_type: Any) -> int:
@@ -520,7 +693,128 @@ def _template_default_connection_type(template_data: dict[str, Any]) -> str | No
     return None
 
 
-class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+def _connection_type_form_field(
+    template_data: dict[str, Any],
+    current_value: Any | None = None,
+) -> tuple[Any, Any] | None:
+    """Optional connection_type selector from template dynamic_config options."""
+    dynamic = template_data.get("dynamic_config") or {}
+    if not isinstance(dynamic, dict):
+        return None
+    ct_cfg = dynamic.get("connection_type")
+    if not isinstance(ct_cfg, dict) or "options" not in ct_cfg:
+        return None
+    default, vol_in = _vol_in_from_dynamic_options(ct_cfg, current_value=current_value)
+    return vol.Optional("connection_type", default=default), vol_in
+
+
+class _GenericEntityLoopMixin:
+    """Add-entity loop shared by hub setup and Add device on an existing hub."""
+
+    def _generic_confirm_actions(self) -> dict[str, str]:
+        return generic_confirm_actions(getattr(self, "hass", None), attach=False)
+
+    async def _async_finish_generic_entity_loop(self) -> FlowResult:
+        """Persist the collected generic registers (hub create or attach)."""
+        raise NotImplementedError
+
+    async def async_step_generic_entity(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Pick entity platform, then type-specific fields."""
+        if user_input is not None:
+            self._generic_entity_type = user_input.get("entity_type", "sensor")
+            return await self.async_step_generic_entity_core()
+        return self.async_show_form(
+            step_id="generic_entity",
+            data_schema=generic_entity_type_schema(hass=self.hass),
+            description_placeholders={
+                "entity_count": str(len(getattr(self, "_generic_registers", []) or [])),
+            },
+        )
+
+    async def async_step_generic_entity_core(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Identity, YAML address, and data type (drives extra fields)."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            self._generic_entity_core = dict(user_input)
+            self._generic_entity_core["entity_type"] = getattr(
+                self, "_generic_entity_type", "sensor"
+            )
+            return await self.async_step_generic_entity_fields()
+        return self.async_show_form(
+            step_id="generic_entity_core",
+            data_schema=generic_entity_core_schema(hass=self.hass),
+            errors=errors,
+            description_placeholders={
+                "entity_type": generic_entity_type_label(
+                    self.hass, getattr(self, "_generic_entity_type", "sensor")
+                ),
+            },
+        )
+
+    async def async_step_generic_entity_fields(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Type-specific extras after identity and data_type are known."""
+        errors: dict[str, str] = {}
+        entity_type = getattr(self, "_generic_entity_type", "sensor")
+        core = dict(getattr(self, "_generic_entity_core", {}) or {})
+        data_type = str(core.get("data_type") or "uint16")
+        if user_input is not None:
+            try:
+                row = {**core, **user_input}
+                row["entity_type"] = entity_type
+                normalize_generic_register(row)
+                existing = list(getattr(self, "_generic_registers", []) or [])
+                existing.append(row)
+                normalize_generic_registers(existing)
+                self._generic_registers = existing
+                return await self.async_step_generic_entity_confirm()
+            except GenericRegisterError as err:
+                _LOGGER.debug("Generic register rejected: %s", err)
+                errors["base"] = "invalid_generic_register"
+            except ValueError:
+                errors["base"] = "invalid_generic_register"
+        return self.async_show_form(
+            step_id="generic_entity_fields",
+            data_schema=generic_entity_extras_schema(
+                entity_type, data_type, hass=self.hass
+            ),
+            errors=errors,
+            description_placeholders={
+                "entity_type": generic_entity_type_label(self.hass, entity_type),
+                "data_type": data_type,
+            },
+        )
+
+    async def async_step_generic_entity_confirm(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Add another entity or finish (create hub / attach device)."""
+        if user_input is not None:
+            if user_input.get("action") == "add":
+                return await self.async_step_generic_entity()
+            return await self._async_finish_generic_entity_loop()
+        count = len(getattr(self, "_generic_registers", []) or [])
+        return self.async_show_form(
+            step_id="generic_entity_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action", default="finish"): vol.In(
+                        self._generic_confirm_actions()
+                    )
+                }
+            ),
+            description_placeholders={"entity_count": str(count)},
+        )
+
+
+class ModbusManagerConfigFlow(
+    _GenericEntityLoopMixin, config_entries.ConfigFlow, domain=DOMAIN
+):
     """Handle a config flow for Modbus Manager."""
 
     VERSION = 7
@@ -796,6 +1090,8 @@ class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._selected_template = template_name
         if template_name == COMBINED_TEMPLATE_SENTINEL:
             return await self.async_step_combined_device()
+        if template_name == GENERIC_TEMPLATE_SENTINEL:
+            return await self.async_step_generic_device()
         template_data = self._templates.get(template_name, {})
         if template_data.get("dynamic_config"):
             return await self.async_step_connection()
@@ -814,13 +1110,132 @@ class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             return self.async_show_menu(
                 step_id="user",
-                menu_options=["detect", "template", "combined_device"],
+                menu_options=[
+                    "detect",
+                    "template",
+                    "generic_device",
+                    "combined_device",
+                ],
             )
         except Exception as e:
             _LOGGER.error("Error in Config Flow: %s", str(e))
             return self.async_abort(
                 reason="unknown_error", description_placeholders={"error": str(e)}
             )
+
+    async def async_step_generic_device(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Start a generic device hub: connection first, then entity loop."""
+        abort = await self._async_load_templates()
+        if abort is not None:
+            return abort
+        self._selected_template = GENERIC_TEMPLATE_SENTINEL
+        if not hasattr(self, "_generic_registers") or self._generic_registers is None:
+            self._generic_registers = []
+        return await self.async_step_connection()
+
+    async def _async_finish_generic_entity_loop(self) -> FlowResult:
+        """Create a new hub (or attach if host:port already exists)."""
+        return await self._async_create_generic_hub_entry()
+
+    async def _async_create_generic_hub_entry(self) -> FlowResult:
+        """Persist hub + one generic devices[] row and finish the flow."""
+        try:
+            rows = normalize_generic_registers(
+                getattr(self, "_generic_registers", None)
+            )
+        except GenericRegisterError as err:
+            return self.async_abort(
+                reason="generic_no_registers",
+                description_placeholders={"error": str(err)},
+            )
+        user_input = dict(getattr(self, "_connection_params", {}) or {})
+        if not self._validate_config(user_input):
+            return self.async_abort(
+                reason="invalid_config",
+                description_placeholders={"error": "Invalid configuration"},
+            )
+        prefix = user_input["prefix"]
+        if not _is_prefix_unique_across_hubs(self.hass, prefix):
+            return self.async_abort(
+                reason="invalid_config",
+                description_placeholders={
+                    "error": (
+                        f"Prefix '{prefix}' already exists. "
+                        "Please choose a unique prefix."
+                    )
+                },
+            )
+        device = self._normalize_device_record(
+            {
+                "type": "generic",
+                "template": GENERIC_TEMPLATE_SENTINEL,
+                "prefix": prefix,
+                "slave_id": user_input.get("slave_id", DEFAULT_SLAVE),
+                "template_version": "0.1.0",
+                CONF_GENERIC_REGISTERS: rows,
+            }
+        )
+        config_data = {
+            "hub": {
+                "host": user_input["host"],
+                "port": user_input.get("port", DEFAULT_PORT),
+                "timeout": user_input.get("timeout", DEFAULT_TIMEOUT),
+                "delay": user_input.get("delay", DEFAULT_DELAY),
+                "message_wait_milliseconds": user_input.get(
+                    "message_wait_milliseconds", DEFAULT_MESSAGE_WAIT_MS
+                ),
+                "post_write_settle_milliseconds": user_input.get(
+                    "post_write_settle_milliseconds",
+                    DEFAULT_POST_WRITE_SETTLE_MS,
+                ),
+            },
+            "devices": [device],
+            "template": GENERIC_TEMPLATE_SENTINEL,
+            "prefix": prefix,
+            "modbus_type": user_input.get("modbus_type", "tcp"),
+            "host": user_input["host"],
+            "port": user_input.get("port", DEFAULT_PORT),
+            "slave_id": user_input.get("slave_id", DEFAULT_SLAVE),
+            "timeout": user_input.get("timeout", DEFAULT_TIMEOUT),
+            "delay": user_input.get("delay", DEFAULT_DELAY),
+            "message_wait_milliseconds": user_input.get(
+                "message_wait_milliseconds", DEFAULT_MESSAGE_WAIT_MS
+            ),
+            "post_write_settle_milliseconds": user_input.get(
+                "post_write_settle_milliseconds",
+                DEFAULT_POST_WRITE_SETTLE_MS,
+            ),
+            "template_version": "0.1.0",
+            CONF_GENERIC_REGISTERS: rows,
+        }
+        config_data["devices"] = [
+            self._normalize_device_record(
+                _apply_entry_data_fallbacks_to_device(device, config_data)
+            )
+            for device in config_data["devices"]
+        ]
+        host = config_data.get("host", "unknown")
+        port = config_data.get("port", 502)
+        title = hub_entry_title_for_new_entry(config_data["devices"], host, port)
+        existing_entry = None
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            if entry.data.get("host") == host and entry.data.get("port", 502) == port:
+                existing_entry = entry
+                break
+        if existing_entry:
+            existing_devices = [
+                self._normalize_device_record(d)
+                for d in existing_entry.data.get("devices", [])
+            ]
+            existing_devices.append(config_data["devices"][0])
+            new_data = dict(existing_entry.data)
+            new_data["devices"] = existing_devices
+            self.hass.config_entries.async_update_entry(existing_entry, data=new_data)
+            await self.hass.config_entries.async_reload(existing_entry.entry_id)
+            return self.async_abort(reason="device_added_to_existing_hub")
+        return self.async_create_entry(title=title, data=config_data)
 
     async def async_step_template(self, user_input: dict | None = None) -> FlowResult:
         """Manual template picker (probe miss, or user skipped detect)."""
@@ -1017,6 +1432,11 @@ class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             schema_fields[
                 vol.Optional("wallbox_slave_id", default=int(hit.wallbox_slave_id))
             ] = int
+        ct_field = _connection_type_form_field(
+            template_data, current_value=hit.connection_type
+        )
+        if ct_field:
+            schema_fields[ct_field[0]] = ct_field[1]
 
         detail_lines = [f"Slave ID: {hit.slave_id}"]
         if hit.selected_model:
@@ -1153,8 +1573,16 @@ class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 description_placeholders={"error": "No config entry for reconfigure"},
             )
 
+        current_modbus = _stored_modbus_type(config_entry.data)
+
         if user_input is not None:
             new_data = dict(config_entry.data)
+            if current_modbus in _TCP_RTU_MODBUS_TYPES:
+                chosen = (
+                    str(user_input.get("modbus_type") or current_modbus).strip().lower()
+                )
+                if chosen in _TCP_RTU_MODBUS_TYPES:
+                    _apply_modbus_type_to_entry_data(new_data, chosen)
             new_data["timeout"] = user_input.get(
                 "timeout", config_entry.data.get("timeout", DEFAULT_TIMEOUT)
             )
@@ -1180,29 +1608,39 @@ class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.hass.config_entries.async_reload(config_entry.entry_id)
             return self.async_create_entry(title="", data={})
 
+        schema_fields: dict[Any, Any] = {}
+        if current_modbus in _TCP_RTU_MODBUS_TYPES:
+            schema_fields[
+                vol.Optional("modbus_type", default=current_modbus)
+            ] = _tcp_rtu_modbus_type_selector(self.hass)
+        schema_fields.update(
+            {
+                vol.Required(
+                    "timeout",
+                    default=config_entry.data.get("timeout", DEFAULT_TIMEOUT),
+                ): int,
+                vol.Required(
+                    "delay", default=config_entry.data.get("delay", DEFAULT_DELAY)
+                ): int,
+                vol.Required(
+                    "message_wait_milliseconds",
+                    default=config_entry.data.get(
+                        "message_wait_milliseconds", DEFAULT_MESSAGE_WAIT_MS
+                    ),
+                ): int,
+                vol.Required(
+                    "post_write_settle_milliseconds",
+                    default=_entry_post_write_settle_ms(config_entry.data),
+                ): int,
+            }
+        )
+
         return self.async_show_form(
             step_id="reconfigure",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        "timeout",
-                        default=config_entry.data.get("timeout", DEFAULT_TIMEOUT),
-                    ): int,
-                    vol.Required(
-                        "delay", default=config_entry.data.get("delay", DEFAULT_DELAY)
-                    ): int,
-                    vol.Required(
-                        "message_wait_milliseconds",
-                        default=config_entry.data.get(
-                            "message_wait_milliseconds", DEFAULT_MESSAGE_WAIT_MS
-                        ),
-                    ): int,
-                    vol.Required(
-                        "post_write_settle_milliseconds",
-                        default=_entry_post_write_settle_ms(config_entry.data),
-                    ): int,
-                }
-            ),
+            data_schema=vol.Schema(schema_fields),
+            description_placeholders={
+                "current_modbus_type": _modbus_type_label(self.hass, current_modbus),
+            },
         )
 
     # Step 2a: User selected a template with dynamic config
@@ -1234,6 +1672,8 @@ class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         default_prefix = stored.get("prefix") or template_data.get(
             "default_prefix", "SG"
         )
+        if self._selected_template == GENERIC_TEMPLATE_SENTINEL:
+            default_prefix = stored.get("prefix") or "GEN"
         default_slave_id = stored.get("slave_id")
         if default_slave_id is None:
             default_slave_id = template_data.get("default_slave_id", DEFAULT_SLAVE)
@@ -1250,6 +1690,11 @@ class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         # Show config_flow_note when selected template has one (e.g. SBR slave-id hint)
         config_flow_note = template_data.get("config_flow_note", "") or ""
+        if self._selected_template == GENERIC_TEMPLATE_SENTINEL:
+            config_flow_note = (
+                "Protocol register numbers are 1-based (PDF style) and stored "
+                "as 0-based addresses like YAML templates."
+            )
 
         # Show connection parameters form
         return self.async_show_form(
@@ -1762,6 +2207,8 @@ class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _route_after_connection_setup(self) -> FlowResult:
         """Proceed to model selection or dynamic params after connection step."""
+        if self._selected_template == GENERIC_TEMPLATE_SENTINEL:
+            return await self.async_step_generic_entity()
         template_data = self._templates.get(self._selected_template, {})
         if self._template_has_model_selection(template_data):
             if getattr(self, "_selected_model", None) or self.context.get(
@@ -1974,24 +2421,21 @@ class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional("firmware_version", default=fw_default)
                 ] = fw_in
 
-        # Add connection type if available (options flow / manual setup only)
-        if "connection_type" in dynamic_config and "connection_type" not in known:
-            ct_cfg = dynamic_config["connection_type"]
-            if isinstance(ct_cfg, dict) and "options" in ct_cfg:
-                probe = getattr(self, "_probe_result", None)
-                ct_current = None
-                if probe is not None and probe.connection_type:
-                    ct_current = probe.connection_type
-                elif (getattr(self, "_connection_params", {}) or {}).get(
+        # Always offer connection_type at setup so the user can override the probe.
+        if "connection_type" in dynamic_config:
+            probe = getattr(self, "_probe_result", None)
+            ct_current = known.get("connection_type")
+            if not ct_current and probe is not None:
+                ct_current = probe.connection_type
+            if not ct_current:
+                ct_current = (getattr(self, "_connection_params", {}) or {}).get(
                     "connection_type"
-                ):
-                    ct_current = self._connection_params.get("connection_type")
-                ct_default, ct_in = _vol_in_from_dynamic_options(
-                    ct_cfg, current_value=ct_current
                 )
-                schema_fields[
-                    vol.Optional("connection_type", default=ct_default)
-                ] = ct_in
+            ct_field = _connection_type_form_field(
+                template_data, current_value=ct_current
+            )
+            if ct_field:
+                schema_fields[ct_field[0]] = ct_field[1]
 
         # Battery slave ID removed - using connection slave_id instead
         # SunSpec model address fields are now handled automatically via dynamic_config
@@ -3276,12 +3720,16 @@ class ModbusManagerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return {"device": ModbusManagerDeviceSubentryFlow}
 
 
-class ModbusManagerDeviceSubentryFlow(config_entries.ConfigSubentryFlow):
+class ModbusManagerDeviceSubentryFlow(
+    _GenericEntityLoopMixin, config_entries.ConfigSubentryFlow
+):
     """Config subentry flow for Modbus Manager devices."""
 
     @staticmethod
     async def _get_template_defaults(template_name: str) -> tuple[str, int]:
         """Return default prefix/slave_id for a template."""
+        if is_generic_device_template(template_name):
+            return "generic", 1
         template_data = await get_template_by_name(template_name)
         if not isinstance(template_data, dict):
             return "device", 1
@@ -3298,11 +3746,12 @@ class ModbusManagerDeviceSubentryFlow(config_entries.ConfigSubentryFlow):
     ) -> FlowResult:
         """Render add-device form with template-aware defaults."""
         template_names = sorted(await get_template_names())
-        if not template_names:
-            return self.async_abort(reason="no_templates")
-
-        if selected_template not in template_names:
-            selected_template = template_names[0]
+        is_generic = is_generic_device_template(selected_template)
+        if not is_generic:
+            if not template_names:
+                return self.async_abort(reason="no_templates")
+            if selected_template not in template_names:
+                selected_template = template_names[0]
 
         if prefix_default is None or slave_id_default is None:
             resolved_prefix, resolved_slave_id = await self._get_template_defaults(
@@ -3317,7 +3766,11 @@ class ModbusManagerDeviceSubentryFlow(config_entries.ConfigSubentryFlow):
         self._add_form_prefix_default = prefix_default
         self._add_form_slave_default = slave_id_default
 
-        template_data = await get_template_by_name(selected_template)
+        template_data = (
+            None
+            if is_generic_device_template(selected_template)
+            else await get_template_by_name(selected_template)
+        )
         dynamic_config = (
             template_data.get("dynamic_config", {})
             if isinstance(template_data, dict)
@@ -3370,10 +3823,9 @@ class ModbusManagerDeviceSubentryFlow(config_entries.ConfigSubentryFlow):
     async def _show_add_template_select_form(self) -> FlowResult:
         """Render first add-device step with template selection only."""
         template_names = sorted(await get_template_names())
-        if not template_names:
-            return self.async_abort(reason="no_templates")
-
-        template_choices = {}
+        template_choices = {
+            GENERIC_TEMPLATE_SENTINEL: generic_device_template_label(self.hass),
+        }
         for tn in template_names:
             td = await get_template_by_name(tn)
             label = (
@@ -3383,7 +3835,7 @@ class ModbusManagerDeviceSubentryFlow(config_entries.ConfigSubentryFlow):
             )
             template_choices[tn] = label
 
-        default_template = template_names[0]
+        default_template = GENERIC_TEMPLATE_SENTINEL
         self._add_form_template_name = None
         self._add_template_candidate = default_template
         self._add_form_prefix_default = None
@@ -3399,6 +3851,64 @@ class ModbusManagerDeviceSubentryFlow(config_entries.ConfigSubentryFlow):
                 }
             ),
         )
+
+    def _generic_confirm_actions(self) -> dict[str, str]:
+        return generic_confirm_actions(self.hass, attach=True)
+
+    async def _async_finish_generic_entity_loop(self) -> FlowResult:
+        """Attach a generic devices[] row to this hub."""
+        return await self._async_attach_generic_device()
+
+    async def _async_attach_generic_device(self) -> FlowResult:
+        """Persist generic_registers on a new devices[] row and reload."""
+        entry = self._get_entry()
+        try:
+            rows = normalize_generic_registers(
+                getattr(self, "_generic_registers", None)
+            )
+        except GenericRegisterError as err:
+            return self.async_abort(
+                reason="generic_no_registers",
+                description_placeholders={"error": str(err)},
+            )
+        prefix = str(getattr(self, "_generic_add_prefix", "") or "").strip()
+        slave_id = int(
+            getattr(self, "_generic_add_slave", DEFAULT_SLAVE) or DEFAULT_SLAVE
+        )
+        if not prefix:
+            return self.async_abort(reason="config_error")
+        if not _is_prefix_unique_across_hubs(
+            self.hass, prefix, exclude_entry_id=entry.entry_id
+        ):
+            return self.async_abort(reason="already_configured")
+        device = self._normalize_device_record(
+            {
+                "type": "generic",
+                "template": GENERIC_TEMPLATE_SENTINEL,
+                "prefix": prefix,
+                "slave_id": slave_id,
+                "template_version": "0.1.0",
+                CONF_GENERIC_REGISTERS: rows,
+            }
+        )
+        devices = self._get_devices(entry)
+        for existing in devices:
+            same_entry_id = existing.get("device_entry_id") == device.get(
+                "device_entry_id"
+            )
+            same_identity = (
+                existing.get("prefix") == device.get("prefix")
+                and existing.get("slave_id") == device.get("slave_id")
+                and existing.get("template") == device.get("template")
+            )
+            if same_entry_id or same_identity:
+                return self.async_abort(reason="already_configured")
+        new_data = dict(entry.data)
+        new_data["devices"] = devices + [device]
+        new_data.pop("pending_subentry_device_id", None)
+        self.hass.config_entries.async_update_entry(entry, data=new_data)
+        self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        return self.async_abort(reason="device_attached")
 
     @staticmethod
     def _build_device_entry_id(device: dict[str, Any]) -> str:
@@ -3582,10 +4092,6 @@ class ModbusManagerDeviceSubentryFlow(config_entries.ConfigSubentryFlow):
             template_name = user_input.get(
                 "template", getattr(self, "_add_template_candidate", None)
             )
-            template_data = await get_template_by_name(template_name)
-            if not template_data or not isinstance(template_data, dict):
-                return self.async_abort(reason="template_not_found")
-
             prefix = str(user_input.get("prefix", "")).strip()
             slave_id = int(user_input.get("slave_id", 1))
 
@@ -3618,6 +4124,20 @@ class ModbusManagerDeviceSubentryFlow(config_entries.ConfigSubentryFlow):
                     prefix_default=new_prefix,
                     slave_id_default=new_slave_id,
                 )
+
+            if is_generic_device_template(template_name):
+                if not _is_prefix_unique_across_hubs(
+                    self.hass, prefix, exclude_entry_id=entry.entry_id
+                ):
+                    return self.async_abort(reason="already_configured")
+                self._generic_add_prefix = prefix
+                self._generic_add_slave = slave_id
+                self._generic_registers = []
+                return await self.async_step_generic_entity()
+
+            template_data = await get_template_by_name(template_name)
+            if not template_data or not isinstance(template_data, dict):
+                return self.async_abort(reason="template_not_found")
 
             device = {
                 "type": template_data.get("type", "inverter") or "inverter",
@@ -3673,6 +4193,8 @@ class ModbusManagerDeviceSubentryFlow(config_entries.ConfigSubentryFlow):
 
             new_data = dict(entry.data)
             new_data["devices"] = devices + [normalized_device]
+            if resolve_device_role_type(normalized_device) == "battery":
+                _apply_hub_battery_from_pack_device(new_data, normalized_device)
             new_data.pop("pending_subentry_device_id", None)
             self.hass.config_entries.async_update_entry(entry, data=new_data)
             self.hass.config_entries.async_schedule_reload(entry.entry_id)
@@ -3809,20 +4331,32 @@ class ModbusManagerDeviceSubentryFlow(config_entries.ConfigSubentryFlow):
 # Dict labels for async_show_menu (list lookups stay blank until HA restarts).
 _OPTIONS_MENU_LABELS = {
     "en": {
-        "connection": "Connection — host, port, and request timing",
+        "connection": "Connection — type, host, port, and request timing",
         "inverter": "Inverter — model, MPPT, and connection",
-        "device": "Device — heating, wallbox, and other options",
+        "device": "Device options",
         "battery": "Battery — model, prefix, and slave",
         "battery_template": "Battery — add, change, or remove template",
         "reload_template": "Reload register templates",
+        "generic_registers": "Generic device — add or edit registers",
+        "generic_export": "Generic device — export YAML template",
+        "generic_export_write": "Write YAML and notify",
+        "generic_export_cancel": "Cancel",
+        "generic_export_close": "Done — YAML written. Download YAML in the notification (link valid 1 hour).",
+        "remove_device": "Remove device — drop from this hub",
     },
     "de": {
-        "connection": "Verbindung — Host, Port und Timing",
+        "connection": "Verbindung — Typ, Host, Port und Timing",
         "inverter": "Wechselrichter — Modell, MPPT und Verbindung",
-        "device": "Gerät — Heizkreis, Wallbox und Optionen",
+        "device": "Geräte Optionen",
         "battery": "Batterie — Modell, Prefix und Slave",
         "battery_template": "Batterie — Template hinzufügen, wechseln oder entfernen",
         "reload_template": "Register-Templates neu laden",
+        "generic_registers": "Generisches Gerät — Register hinzufügen oder bearbeiten",
+        "generic_export": "Generisches Gerät — YAML-Template exportieren",
+        "generic_export_write": "YAML schreiben und benachrichtigen",
+        "generic_export_cancel": "Abbrechen",
+        "generic_export_close": "Fertig — YAML geschrieben. Download YAML in der Benachrichtigung (Link 1 Stunde gültig).",
+        "remove_device": "Gerät entfernen — vom Hub streichen",
     },
 }
 
@@ -3871,33 +4405,33 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
             if resolve_device_role_type(device) not in {"inverter", "battery"}
         ]
 
-    async def _remove_battery_devices_from_registry(
-        self, battery_devices: list
-    ) -> None:
-        """Remove battery devices from device registry when they are removed from config."""
+    def _generic_option_devices(self) -> list[dict[str, Any]]:
+        """Hub devices that store generic_registers."""
+        return [
+            device
+            for device in self._get_editable_devices()
+            if is_generic_device_template(device.get("template"))
+        ]
+
+    async def _remove_hub_devices_from_registry(self, devices: list) -> None:
+        """Drop registry devices for rows removed from this hub's devices[]."""
         try:
             device_registry = dr.async_get(self.hass)
-            hub_config = self.config_entry.data.get("hub", {})
-            host = hub_config.get("host") or self.config_entry.data.get(
-                "host", "unknown"
-            )
-            port = hub_config.get("port") or self.config_entry.data.get("port", 502)
+            host, port = entry_host_port(self.config_entry)
 
-            for battery_device in battery_devices:
-                device_entry_id = battery_device.get(
+            for device in devices:
+                device_entry_id = device.get(
                     "device_entry_id"
-                ) or build_device_entry_id(battery_device)
+                ) or build_device_entry_id(device)
                 device_identifier = hub_device_identifier(host, port, device_entry_id)
-
                 device_entry = async_get_registry_device(
                     device_registry,
                     device_identifier,
                     self.config_entry.entry_id,
                 )
                 if device_entry is None:
-                    battery_slave_id = battery_device.get("slave_id", 200)
                     legacy_identifier = legacy_hub_device_identifier(
-                        host, port, battery_slave_id
+                        host, port, device.get("slave_id", 1)
                     )
                     device_entry = async_get_registry_device(
                         device_registry,
@@ -3905,33 +4439,31 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                         self.config_entry.entry_id,
                     )
 
-                if device_entry:
-                    # Check if this device belongs to this config entry
-                    if (
-                        device_entry.config_entries
-                        and self.config_entry.entry_id in device_entry.config_entries
-                    ):
-                        # Remove device from registry
-                        device_registry.async_remove_device(device_entry.id)
-                        _LOGGER.info(
-                            "Removed battery device '%s' (%s) from device registry",
-                            battery_device.get("prefix", "unknown"),
-                            device_entry_id,
-                        )
-                    else:
-                        _LOGGER.debug(
-                            "Battery device '%s' (%s) not found in device registry or belongs to different config entry",
-                            battery_device.get("prefix", "unknown"),
-                            device_entry_id,
-                        )
-                else:
+                if device_entry is None:
                     _LOGGER.debug(
-                        "Battery device '%s' (%s) not found in device registry",
-                        battery_device.get("prefix", "unknown"),
+                        "Hub device '%s' (%s) not found in device registry",
+                        device.get("prefix", "unknown"),
+                        device_entry_id,
+                    )
+                    continue
+                if (
+                    device_entry.config_entries
+                    and self.config_entry.entry_id in device_entry.config_entries
+                ):
+                    device_registry.async_remove_device(device_entry.id)
+                    _LOGGER.info(
+                        "Removed hub device '%s' (%s) from device registry",
+                        device.get("prefix", "unknown"),
                         device_entry_id,
                     )
         except Exception as e:
-            _LOGGER.error("Error removing battery devices from registry: %s", str(e))
+            _LOGGER.error("Error removing hub devices from registry: %s", str(e))
+
+    async def _remove_battery_devices_from_registry(
+        self, battery_devices: list
+    ) -> None:
+        """Remove battery devices from device registry when they are removed from config."""
+        await self._remove_hub_devices_from_registry(battery_devices)
 
     def _supports_battery_config(self, template_data: dict) -> bool:
         """Check if template defines a battery_config dynamic section."""
@@ -3947,6 +4479,9 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
     def _options_menu_options(self) -> list[str]:
         """Connection always; device forms and template reload when applicable."""
         options = ["connection"]
+        if self._generic_option_devices():
+            options.append("generic_registers")
+            options.append("generic_export")
         devices = self._get_editable_devices()
         roles = {resolve_device_role_type(device) for device in devices}
         if "inverter" in roles:
@@ -3957,8 +4492,12 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
             options.append("battery")
         if "inverter" in roles or "battery" in roles:
             options.append("battery_template")
-        if devices:
+        if any(
+            not is_generic_device_template(device.get("template")) for device in devices
+        ):
             options.append("reload_template")
+        if len(devices) >= 2:
+            options.append("remove_device")
         return options
 
     def _options_menu_labels(self, option_ids: list[str]) -> dict[str, str]:
@@ -4128,9 +4667,493 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
         """Add, replace, or remove the battery template on this hub."""
         return await self.async_step_battery_options_selection()
 
+    def _remove_device_choices(self) -> dict[str, str]:
+        """device_entry_id → label for Remove device."""
+        choices: dict[str, str] = {}
+        for device in self._get_editable_devices():
+            device_id = str(device.get("device_entry_id") or "")
+            if not device_id:
+                continue
+            title = _device_display_title(device)
+            role = resolve_device_role_type(device)
+            choices[device_id] = f"{title} ({role})"
+        return choices
+
+    async def async_step_remove_device(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Pick a hub device to drop from devices[]."""
+        devices = self._get_editable_devices()
+        if len(devices) < 2:
+            return self.async_abort(reason="cannot_remove_last_device")
+
+        choices = self._remove_device_choices()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            chosen_id = str(user_input.get("device_entry_id") or "")
+            if chosen_id not in choices:
+                errors["device_entry_id"] = "unknown_device"
+            else:
+                self._remove_device_target_id = chosen_id
+                return await self.async_step_remove_device_confirm()
+
+        return self.async_show_form(
+            step_id="remove_device",
+            data_schema=vol.Schema({vol.Required("device_entry_id"): vol.In(choices)}),
+            errors=errors,
+        )
+
+    async def async_step_remove_device_confirm(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Confirm drop from devices[]; then purge that registry device."""
+        devices = self._get_editable_devices()
+        if len(devices) < 2:
+            return self.async_abort(reason="cannot_remove_last_device")
+
+        chosen_id = str(getattr(self, "_remove_device_target_id", "") or "")
+        selected = next(
+            (
+                device
+                for device in devices
+                if device.get("device_entry_id") == chosen_id
+            ),
+            None,
+        )
+        if selected is None:
+            return self.async_abort(reason="config_error")
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if not user_input.get("confirm"):
+                errors["confirm"] = "not_confirmed"
+            else:
+                new_data = dict(self.config_entry.data)
+                stored_devices: list[dict[str, Any]] = []
+                for device in new_data.get("devices") or []:
+                    if not isinstance(device, dict):
+                        continue
+                    record = dict(device)
+                    if not record.get("device_entry_id"):
+                        record["device_entry_id"] = build_device_entry_id(record)
+                    stored_devices.append(record)
+                remaining = [
+                    device
+                    for device in stored_devices
+                    if device.get("device_entry_id") != chosen_id
+                ]
+                if len(remaining) < 1:
+                    return self.async_abort(reason="cannot_remove_last_device")
+                _apply_hub_keys_after_device_removed(new_data, selected, remaining)
+                new_data["devices"] = remaining
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+                await self._remove_hub_devices_from_registry([selected])
+                await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+                return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="remove_device_confirm",
+            data_schema=vol.Schema({vol.Required("confirm", default=False): bool}),
+            errors=errors,
+            description_placeholders={
+                "device": self._remove_device_choices().get(
+                    chosen_id, _device_display_title(selected)
+                ),
+            },
+        )
+
     async def async_step_reload_template(self, user_input: dict = None) -> FlowResult:
         """Reload YAML register templates for this hub."""
         return await self.async_step_update_template()
+
+    def _generic_row_choices(self) -> dict[str, str]:
+        """unique_id → label for edit/remove pickers."""
+        choices: dict[str, str] = {}
+        for row in getattr(self, "_generic_opt_rows", []) or []:
+            uid = str(row.get("unique_id") or "")
+            if not uid:
+                continue
+            name = str(row.get("name") or uid)
+            address = row.get("address", "?")
+            choices[uid] = f"{name} ({uid}, {address})"
+        return choices
+
+    def _bind_generic_option_device(self, device: dict[str, Any]) -> None:
+        """Load working copy of generic_registers for one hub device."""
+        self._generic_opt_device = device
+        raw = list(device.get(CONF_GENERIC_REGISTERS) or [])
+        try:
+            self._generic_opt_rows = normalize_generic_registers(raw)
+        except GenericRegisterError:
+            self._generic_opt_rows = [dict(row) for row in raw if isinstance(row, dict)]
+
+    async def _async_finish_generic_options(self) -> FlowResult:
+        """Persist working rows onto the hub device and reload."""
+        device = getattr(self, "_generic_opt_device", None)
+        if not isinstance(device, dict):
+            return self.async_abort(reason="config_error")
+        try:
+            rows = normalize_generic_registers(getattr(self, "_generic_opt_rows", None))
+        except GenericRegisterError:
+            return self.async_abort(reason="config_error")
+        device_id = device.get("device_entry_id")
+        new_data = dict(self.config_entry.data)
+        devices = []
+        generic_count = 0
+        for existing in new_data.get("devices", []):
+            if not isinstance(existing, dict):
+                continue
+            updated = dict(existing)
+            if is_generic_device_template(updated.get("template")):
+                generic_count += 1
+            if updated.get("device_entry_id") == device_id:
+                updated[CONF_GENERIC_REGISTERS] = rows
+            devices.append(updated)
+        new_data["devices"] = devices
+        if generic_count <= 1:
+            new_data[CONF_GENERIC_REGISTERS] = rows
+        self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+        await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+        return self.async_create_entry(title="", data={})
+
+    async def async_step_generic_registers(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Pick a generic device (if needed), then add / edit / remove / save."""
+        devices = self._generic_option_devices()
+        if not devices:
+            return self.async_abort(reason="config_error")
+
+        stored = getattr(self, "_generic_opt_device", None)
+        picking = stored is None and len(devices) > 1
+        if picking:
+            if user_input and user_input.get("device_entry_id"):
+                chosen = next(
+                    (
+                        device
+                        for device in devices
+                        if device.get("device_entry_id")
+                        == user_input.get("device_entry_id")
+                    ),
+                    None,
+                )
+                if not chosen:
+                    return self.async_abort(reason="config_error")
+                self._bind_generic_option_device(chosen)
+                return await self.async_step_generic_registers()
+            choices = {
+                device.get("device_entry_id"): _device_display_title(device)
+                for device in devices
+            }
+            return self.async_show_form(
+                step_id="generic_registers",
+                data_schema=vol.Schema(
+                    {vol.Required("device_entry_id"): vol.In(choices)}
+                ),
+            )
+
+        if stored is None:
+            self._bind_generic_option_device(devices[0])
+
+        if user_input is not None and "action" in user_input:
+            action = user_input.get("action")
+            if action == "add":
+                self._generic_opt_mode = "add"
+                self._generic_opt_edit_uid = None
+                return await self.async_step_generic_opt_entity()
+            if action == "edit":
+                self._generic_opt_mode = "edit"
+                return await self.async_step_generic_opt_pick()
+            if action == "remove":
+                self._generic_opt_mode = "remove"
+                return await self.async_step_generic_opt_pick()
+            if action == "save":
+                return await self._async_finish_generic_options()
+
+        count = len(getattr(self, "_generic_opt_rows", []) or [])
+        device = getattr(self, "_generic_opt_device", devices[0])
+        return self.async_show_form(
+            step_id="generic_registers",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action", default="save"): vol.In(
+                        generic_opt_actions(self.hass)
+                    )
+                }
+            ),
+            description_placeholders={
+                "device": _device_display_title(device),
+                "entity_count": str(count),
+            },
+        )
+
+    async def async_step_generic_opt_pick(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Choose unique_id to edit or remove."""
+        choices = self._generic_row_choices()
+        if not choices:
+            return await self.async_step_generic_registers()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            uid = str(user_input.get("unique_id") or "")
+            if uid not in choices:
+                errors["unique_id"] = "invalid_generic_register"
+            elif getattr(self, "_generic_opt_mode", "") == "remove":
+                if len(getattr(self, "_generic_opt_rows", []) or []) <= 1:
+                    errors["unique_id"] = "last_generic_register"
+                else:
+                    self._generic_opt_edit_uid = uid
+                    return await self.async_step_generic_opt_remove()
+            else:
+                self._generic_opt_edit_uid = uid
+                row = next(
+                    (
+                        item
+                        for item in self._generic_opt_rows
+                        if item.get("unique_id") == uid
+                    ),
+                    None,
+                )
+                self._generic_entity_type = str(
+                    (row or {}).get("entity_type") or "sensor"
+                )
+                return await self.async_step_generic_opt_core()
+        return self.async_show_form(
+            step_id="generic_opt_pick",
+            data_schema=vol.Schema({vol.Required("unique_id"): vol.In(choices)}),
+            errors=errors,
+            description_placeholders={
+                "mode": generic_opt_mode_label(
+                    self.hass, getattr(self, "_generic_opt_mode", "edit")
+                ),
+            },
+        )
+
+    async def async_step_generic_opt_remove(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Confirm drop from generic_registers; do not purge the entity registry."""
+        uid = str(getattr(self, "_generic_opt_edit_uid", "") or "")
+        if user_input is not None:
+            if user_input.get("confirm"):
+                self._generic_opt_rows = [
+                    row
+                    for row in (getattr(self, "_generic_opt_rows", []) or [])
+                    if row.get("unique_id") != uid
+                ]
+            return await self.async_step_generic_registers()
+        return self.async_show_form(
+            step_id="generic_opt_remove",
+            data_schema=vol.Schema({vol.Required("confirm", default=False): bool}),
+            description_placeholders={"unique_id": uid},
+        )
+
+    async def async_step_generic_opt_entity(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Pick platform when adding a generic register in options."""
+        if user_input is not None:
+            self._generic_entity_type = user_input.get("entity_type", "sensor")
+            self._generic_entity_core = {}
+            return await self.async_step_generic_opt_core()
+        return self.async_show_form(
+            step_id="generic_opt_entity",
+            data_schema=generic_entity_type_schema(hass=self.hass),
+            description_placeholders={
+                "entity_count": str(len(getattr(self, "_generic_opt_rows", []) or [])),
+            },
+        )
+
+    async def async_step_generic_opt_core(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Identity + address; unique_id is locked when editing."""
+        errors: dict[str, str] = {}
+        editing = getattr(self, "_generic_opt_mode", "") == "edit"
+        edit_uid = str(getattr(self, "_generic_opt_edit_uid", "") or "")
+        existing = {}
+        if editing:
+            existing = next(
+                (
+                    row
+                    for row in (getattr(self, "_generic_opt_rows", []) or [])
+                    if row.get("unique_id") == edit_uid
+                ),
+                {},
+            )
+            self._generic_entity_type = str(
+                existing.get("entity_type")
+                or getattr(self, "_generic_entity_type", "sensor")
+            )
+        if user_input is not None:
+            core = dict(user_input)
+            core["entity_type"] = getattr(self, "_generic_entity_type", "sensor")
+            if editing:
+                core["unique_id"] = edit_uid
+            else:
+                new_uid = str(core.get("unique_id") or "")
+                taken = {
+                    str(row.get("unique_id"))
+                    for row in (getattr(self, "_generic_opt_rows", []) or [])
+                }
+                if new_uid in taken:
+                    errors["unique_id"] = "duplicate_generic_unique_id"
+            if not errors:
+                self._generic_entity_core = core
+                return await self.async_step_generic_opt_fields()
+        defaults = generic_row_form_defaults(existing) if existing else None
+        return self.async_show_form(
+            step_id="generic_opt_core",
+            data_schema=generic_entity_core_schema(
+                defaults, include_unique_id=not editing, hass=self.hass
+            ),
+            errors=errors,
+            description_placeholders={
+                "entity_type": generic_entity_type_label(
+                    self.hass, getattr(self, "_generic_entity_type", "sensor")
+                ),
+                "unique_id": edit_uid or "—",
+            },
+        )
+
+    async def async_step_generic_opt_fields(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Type-specific extras for add/edit in options."""
+        errors: dict[str, str] = {}
+        entity_type = getattr(self, "_generic_entity_type", "sensor")
+        core = dict(getattr(self, "_generic_entity_core", {}) or {})
+        data_type = str(core.get("data_type") or "uint16")
+        editing = getattr(self, "_generic_opt_mode", "") == "edit"
+        edit_uid = str(getattr(self, "_generic_opt_edit_uid", "") or "")
+        existing = {}
+        if editing:
+            existing = next(
+                (
+                    row
+                    for row in (getattr(self, "_generic_opt_rows", []) or [])
+                    if row.get("unique_id") == edit_uid
+                ),
+                {},
+            )
+        if user_input is not None:
+            try:
+                row = {**existing, **core, **user_input}
+                row["entity_type"] = entity_type
+                if editing:
+                    row["unique_id"] = edit_uid
+                normalized = normalize_generic_register(row)
+                working = list(getattr(self, "_generic_opt_rows", []) or [])
+                if editing:
+                    working = [
+                        normalized if item.get("unique_id") == edit_uid else item
+                        for item in working
+                    ]
+                else:
+                    working.append(normalized)
+                self._generic_opt_rows = normalize_generic_registers(working)
+                return await self.async_step_generic_registers()
+            except GenericRegisterError as err:
+                _LOGGER.debug("Generic options register rejected: %s", err)
+                errors["base"] = "invalid_generic_register"
+            except ValueError:
+                errors["base"] = "invalid_generic_register"
+        defaults = generic_row_form_defaults(existing) if existing else None
+        return self.async_show_form(
+            step_id="generic_opt_fields",
+            data_schema=generic_entity_extras_schema(
+                entity_type, data_type, defaults, hass=self.hass
+            ),
+            errors=errors,
+            description_placeholders={
+                "entity_type": generic_entity_type_label(self.hass, entity_type),
+                "data_type": data_type,
+                "unique_id": edit_uid or str(core.get("unique_id") or ""),
+            },
+        )
+
+    async def async_step_generic_export(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Write YAML to custom templates and www; notify with a download link."""
+        devices = self._generic_option_devices()
+        if not devices:
+            return self.async_abort(reason="config_error")
+
+        stored = getattr(self, "_generic_export_device", None)
+        picking = stored is None and len(devices) > 1
+        if picking:
+            if user_input and user_input.get("device_entry_id"):
+                chosen = next(
+                    (
+                        device
+                        for device in devices
+                        if device.get("device_entry_id")
+                        == user_input.get("device_entry_id")
+                    ),
+                    None,
+                )
+                if not chosen:
+                    return self.async_abort(reason="config_error")
+                self._generic_export_device = chosen
+                return await self.async_step_generic_export()
+            choices = {
+                device.get("device_entry_id"): _device_display_title(device)
+                for device in devices
+            }
+            return self.async_show_form(
+                step_id="generic_export",
+                data_schema=vol.Schema(
+                    {vol.Required("device_entry_id"): vol.In(choices)}
+                ),
+            )
+
+        device = stored or devices[0]
+        self._generic_export_device = device
+        return self.async_show_menu(
+            step_id="generic_export",
+            menu_options=self._options_menu_labels(
+                ["generic_export_write", "generic_export_cancel"]
+            ),
+        )
+
+    async def async_step_generic_export_write(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Write YAML files and notify with a signed download link."""
+        device = getattr(self, "_generic_export_device", None)
+        if not isinstance(device, dict):
+            devices = self._generic_option_devices()
+            if not devices:
+                return self.async_abort(reason="config_error")
+            device = devices[0]
+        try:
+            result = await async_export_generic_device(self.hass, device)
+            await async_notify_generic_export(
+                self.hass, result, str(device.get("prefix") or "generic")
+            )
+            return self.async_show_menu(
+                step_id="generic_export",
+                menu_options=self._options_menu_labels(["generic_export_close"]),
+            )
+        except Exception as err:
+            _LOGGER.error("Generic YAML export failed: %s", err)
+            return self.async_abort(reason="generic_export_failed")
+
+    async def async_step_generic_export_close(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Return to the options menu after a successful export."""
+        return await self.async_step_init()
+
+    async def async_step_generic_export_cancel(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Return to the options menu without exporting."""
+        return await self.async_step_init()
 
     async def async_step_connection(self, user_input: dict = None) -> FlowResult:
         """Manage hub-level connection options."""
@@ -4141,6 +5164,7 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
             return self.async_abort(reason="combined_device")
 
         current_host, current_port = entry_host_port(self.config_entry)
+        current_modbus = _stored_modbus_type(self.config_entry.data)
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -4186,6 +5210,14 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                 )
                 new_data["host"] = new_host
                 new_data["port"] = new_port
+                if current_modbus in _TCP_RTU_MODBUS_TYPES:
+                    chosen = (
+                        str(user_input.get("modbus_type") or current_modbus)
+                        .strip()
+                        .lower()
+                    )
+                    if chosen in _TCP_RTU_MODBUS_TYPES:
+                        _apply_modbus_type_to_entry_data(new_data, chosen)
                 hub_config = new_data.get("hub")
                 if isinstance(hub_config, dict):
                     hub_config = dict(hub_config)
@@ -4194,6 +5226,8 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                     hub_config["post_write_settle_milliseconds"] = new_data[
                         "post_write_settle_milliseconds"
                     ]
+                    if new_data.get("modbus_type"):
+                        hub_config["type"] = new_data["modbus_type"]
                     new_data["hub"] = hub_config
 
                 endpoint_changed = (new_host, new_port) != (
@@ -4232,33 +5266,43 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                     )
                 return self.async_create_entry(title="", data={})
 
-        schema_fields: dict[Any, Any] = {
-            vol.Required("host", default=current_host): str,
-            vol.Required("port", default=current_port): int,
-            vol.Required(
-                "timeout",
-                default=self.config_entry.data.get("timeout", DEFAULT_TIMEOUT),
-            ): int,
-            vol.Required(
-                "delay",
-                default=self.config_entry.data.get("delay", DEFAULT_DELAY),
-            ): int,
-            vol.Required(
-                "message_wait_milliseconds",
-                default=self.config_entry.data.get(
-                    "message_wait_milliseconds", DEFAULT_MESSAGE_WAIT_MS
-                ),
-            ): int,
-            vol.Required(
-                "post_write_settle_milliseconds",
-                default=_entry_post_write_settle_ms(self.config_entry.data),
-            ): int,
-        }
+        schema_fields: dict[Any, Any] = {}
+        if current_modbus in _TCP_RTU_MODBUS_TYPES:
+            schema_fields[
+                vol.Optional("modbus_type", default=current_modbus)
+            ] = _tcp_rtu_modbus_type_selector(self.hass)
+        schema_fields.update(
+            {
+                vol.Required("host", default=current_host): str,
+                vol.Required("port", default=current_port): int,
+                vol.Required(
+                    "timeout",
+                    default=self.config_entry.data.get("timeout", DEFAULT_TIMEOUT),
+                ): int,
+                vol.Required(
+                    "delay",
+                    default=self.config_entry.data.get("delay", DEFAULT_DELAY),
+                ): int,
+                vol.Required(
+                    "message_wait_milliseconds",
+                    default=self.config_entry.data.get(
+                        "message_wait_milliseconds", DEFAULT_MESSAGE_WAIT_MS
+                    ),
+                ): int,
+                vol.Required(
+                    "post_write_settle_milliseconds",
+                    default=_entry_post_write_settle_ms(self.config_entry.data),
+                ): int,
+            }
+        )
 
         return self.async_show_form(
             step_id="connection",
             data_schema=vol.Schema(schema_fields),
             errors=errors,
+            description_placeholders={
+                "current_modbus_type": _modbus_type_label(self.hass, current_modbus),
+            },
         )
 
     async def _async_build_template_reload_plan(self) -> list[dict[str, Any]]:
@@ -4687,6 +5731,13 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
     async def async_step_apply_config_changes(self, user_input: dict) -> FlowResult:
         """Apply configuration changes and reload integration if needed."""
         try:
+            original_keys = set(user_input)
+            pack_intent = user_input.get("battery_template") or user_input.get(
+                "battery_config"
+            )
+            explicit_pack_choice = bool(
+                {"battery_config", "battery_template"} & original_keys
+            )
             # Force battery_config to none when battery_config condition not met
             template_name = self.config_entry.data.get("template", "Unknown")
             template_data = await get_template_by_name(template_name)
@@ -4703,7 +5754,15 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                 )
                 effective_data = {**self.config_entry.data, **user_input}
                 user_input = dict(user_input)
-                if condition and not _evaluate_condition(condition, effective_data):
+                connection_type = user_input.get(
+                    "connection_type", effective_data.get("connection_type")
+                )
+                if (
+                    condition
+                    and not _evaluate_condition(condition, effective_data)
+                    and not _is_pack_template_selection(pack_intent)
+                    and pack_intent not in ("sbr_battery", "standard_battery")
+                ):
                     user_input["battery_config"] = "none"
                     user_input["battery_template"] = "none"
                     _LOGGER.info(
@@ -4711,14 +5770,12 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                         condition,
                         effective_data.get("connection_type"),
                     )
-                else:
+                elif explicit_pack_choice:
+                    raw = user_input.get(
+                        "battery_config", user_input.get("battery_template")
+                    )
                     user_input["battery_config"] = _clamp_battery_config_for_connection(
-                        user_input.get(
-                            "battery_config", effective_data.get("battery_config")
-                        ),
-                        user_input.get(
-                            "connection_type", effective_data.get("connection_type")
-                        ),
+                        raw, connection_type
                     )
 
             # Check if dynamic configuration has changed
@@ -4775,30 +5832,51 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
             new_data = dict(self.config_entry.data)
             new_data.update(user_input)
 
-            # Ensure battery_enabled is stored based on battery_config
-            if "battery_config" in user_input:
-                new_data["battery_enabled"] = user_input["battery_config"] != "none"
+            battery_selection = None
+            if explicit_pack_choice:
+                battery_selection = user_input.get(
+                    "battery_template"
+                ) or user_input.get("battery_config")
+                battery_selection = _clamp_battery_config_for_connection(
+                    battery_selection, new_data.get("connection_type")
+                )
 
-            battery_selection = new_data.get("battery_config")
             if battery_selection in ["none", "other"]:
                 new_data["battery_template"] = battery_selection
-            elif battery_selection:
+                new_data["battery_config"] = (
+                    "none"
+                    if battery_selection == "none"
+                    else _clamp_battery_config_for_connection(
+                        "other", new_data.get("connection_type")
+                    )
+                )
+                new_data["battery_enabled"] = new_data["battery_config"] != "none"
+            elif _is_pack_template_selection(battery_selection):
                 new_data["battery_template"] = battery_selection
+                new_data["battery_config"] = _hub_battery_config_for_pack(
+                    battery_selection, new_data.get("connection_type")
+                )
+                new_data["battery_enabled"] = True
+                user_input["battery_config"] = new_data["battery_config"]
+                user_input["battery_template"] = battery_selection
+            elif battery_selection in ("sbr_battery", "standard_battery"):
+                new_data["battery_config"] = battery_selection
+                new_data["battery_enabled"] = True
+                user_input["battery_config"] = battery_selection
+            elif "battery_config" in user_input:
+                new_data["battery_enabled"] = user_input["battery_config"] != "none"
 
             # Sync devices array for battery selection changes
             devices = new_data.get("devices")
             battery_removed = False
             removed_battery_devices = []  # Store removed devices for cleanup
-            if isinstance(devices, list) and devices:
+            if isinstance(devices, list) and devices and explicit_pack_choice:
                 battery_devices = [
                     device for device in devices if device.get("type") == "battery"
                 ]
                 if battery_selection in ["none", "other"]:
                     if battery_devices:
-                        # Store removed devices for device registry cleanup
                         removed_battery_devices = battery_devices.copy()
-
-                        # Remove battery devices from devices array
                         devices[:] = [
                             device
                             for device in devices
@@ -4810,20 +5888,31 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                             len(battery_devices),
                             battery_selection,
                         )
-                elif battery_selection:
-                    battery_template_data = await get_template_by_name(
-                        battery_selection
+                elif _is_pack_template_selection(battery_selection):
+                    pack_template = battery_selection
+                    battery_template_data = await get_template_by_name(pack_template)
+                    previous = battery_devices[0] if battery_devices else {}
+                    battery_prefix = new_data.get("battery_prefix") or previous.get(
+                        "prefix", "SBR"
                     )
-                    battery_prefix = new_data.get("battery_prefix", "SBR")
-                    battery_slave_id = new_data.get("battery_slave_id", 200)
-                    battery_model = new_data.get("battery_model")
-                    battery_device = {
-                        "type": "battery",
-                        "template": battery_selection,
-                        "prefix": battery_prefix,
-                        "slave_id": battery_slave_id,
-                        "selected_model": battery_model,
-                    }
+                    battery_slave_id = new_data.get(
+                        "battery_slave_id", previous.get("slave_id", 200)
+                    )
+                    battery_model = new_data.get("battery_model") or previous.get(
+                        "selected_model"
+                    )
+                    battery_device = dict(previous)
+                    battery_device.update(
+                        {
+                            "type": "battery",
+                            "template": pack_template,
+                            "prefix": battery_prefix,
+                            "slave_id": battery_slave_id,
+                            "selected_model": battery_model,
+                        }
+                    )
+                    if previous.get("device_entry_id"):
+                        battery_device["device_entry_id"] = previous["device_entry_id"]
                     if battery_template_data and isinstance(
                         battery_template_data, dict
                     ):
@@ -4833,6 +5922,7 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                         battery_device["firmware_version"] = battery_template_data.get(
                             "firmware_version", "1.0.0"
                         )
+                    battery_device = self._normalize_device_record(battery_device)
                     if battery_devices:
                         for i, device in enumerate(devices):
                             if device.get("type") == "battery":
@@ -4840,6 +5930,7 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                                 break
                     else:
                         devices.append(battery_device)
+                    _apply_hub_battery_from_pack_device(new_data, battery_device)
 
             # Keep device-specific dynamic config in sync with options updates
             devices = new_data.get("devices")
@@ -4848,8 +5939,13 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                     if device.get("template") != template_name:
                         continue
                     for key in dynamic_params:
-                        if key in user_input:
-                            device[key] = user_input[key]
+                        if key not in user_input:
+                            continue
+                        if key == "battery_template" and _is_pack_template_selection(
+                            user_input.get(key)
+                        ):
+                            continue
+                        device[key] = user_input[key]
 
             # Remove temporary fields
             new_data.pop("update_template", None)

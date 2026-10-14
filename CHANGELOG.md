@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-12
+
+### ✨ Added
+
+- **Hub — remove a device ([#110](https://github.com/TCzerny/ha-modbus-manager/issues/110))**: Options → **Remove device** drops one `devices[]` row after confirm. The last device cannot be removed (delete the hub). Pack hub keys follow **None**; a lone wallbox clears `wallbox_connected`. The registry device is deleted; remaining devices and Combined Device entries stay. `unique_id` formula unchanged.
+- **Sungrow SHx — meter phase U/I on SH10RT-20 ([#120](https://github.com/TCzerny/ha-modbus-manager/issues/120))**: Undocumented meter phase voltage/current (5740–5745) also when `selected_model` is **SH10RT-20** (same DTSU666 / LAN|RS485 gate as SH10RT). Reporter confirmed live values. `unique_id` unchanged. Template v1.2.23.
+
+### 🐛 Fixed
+
+- **Battery options — changing template dropped the pack ([#119](https://github.com/TCzerny/ha-modbus-manager/issues/119))**: WiNet clamp treated the YAML template name as invalid and set `battery_config` to `none`, then deleted `devices[]` and the registry device. Pack template names are kept; hub `battery_template` / `battery_prefix` / `battery_slave_id` / `battery_enabled` sync from the pack row (including **Add device**). Registry purge only when the user picks **None**. `unique_id` unchanged.
+- **Setup — WiNet connection type ([#115](https://github.com/TCzerny/ha-modbus-manager/issues/115))**: Detect confirm and the setup dynamic-config form always offer LAN / WiNet-S / RS485 (probe is the default). Previously a probed `connection_type` hid the field, so a LAN guess created WiNet-absent entities until Options. Existing entries are not rewritten.
+- **Hub — TCP vs RTU over TCP ([#112](https://github.com/TCzerny/ha-modbus-manager/issues/112))**: Options → Connection and hub Reconfigure show the stored transport and allow switching Modbus TCP ↔ RTU over TCP. Host, port, and `devices[]` stay. Serial RTU is display-only on these screens. Not LAN/WiNet (`connection_type`). `unique_id` unchanged.
+
+## [1.3.0] - 2026-10-03
+
+### ✨ Added
+
+- **Generic Device (PoC, [Discussion #100](https://github.com/TCzerny/ha-modbus-manager/discussions/100))**: UI register map on a hub (**Create a generic device** or **Add device**). Same coordinator as YAML. Holding/input; sensor / binary_sensor / number / switch / select / text / button. Options: add / edit / remove (`unique_id` locked on edit), **Device options**, YAML export with a signed 1-hour download. Select **options**, sensor **map** and **flags** are comma-separated lines; form `address` matches YAML. See [Generic Device](docs/README_generic_device.md).
+- **Templates — `translation_key`**: Optional per entity. HA uses `entity.<platform>.<translation_key>.name` in `translations/en.json` / `de.json`. YAML `name` is the English label when no key is set. `unique_id` unchanged. Select/map state localization is later.
+- **Templates — `enabled_by_default`**: Optional bool (alias `enable_default`). Default **true**. `false` creates the entity disabled. Only applies to **new** registry rows.
+- **Generic Device UI language**: Radio and select labels on every Generic screen (add/edit/remove/save, entity type, register type, category, byte order, confirm) follow Home Assistant language (`de`/`en`). `vol.In` uses those dict values; JSON already translated field titles.
+
+### 🐛 Fixed
+
+- **`dynamic_config` — binary_sensors**: `condition` / `valid_models` / `connection_type` apply to `binary_sensors` the same way as sensors.
+
 ## [1.2.2] - 2026-10-02
 
 ### ✨ Added

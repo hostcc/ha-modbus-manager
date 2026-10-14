@@ -16,6 +16,7 @@ from .const import (
     DOMAIN,
     ENTRY_TYPE_COMBINED_DEVICE,
     ENTRY_TYPE_HUB,
+    GENERIC_TEMPLATE_SENTINEL,
     EntityIdStrategy,
 )
 
@@ -619,6 +620,49 @@ def generate_unique_id(
     return f"{p}_unknown"
 
 
+def template_enabled_by_default(register_config: dict[str, Any]) -> bool:
+    """Whether a new entity is enabled in the registry (existing rows keep theirs).
+
+    YAML ``enabled_by_default`` or ``enable_default``. Absent means True.
+    """
+    if "enabled_by_default" in register_config:
+        value = register_config.get("enabled_by_default")
+    elif "enable_default" in register_config:
+        value = register_config.get("enable_default")
+    else:
+        return True
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text not in {"false", "0", "no", "off"}
+
+
+def apply_template_entity_display(
+    entity: Any, register_config: dict[str, Any], *, fallback_name: str
+) -> None:
+    """Set name, translation_key, and enabled-by-default from a template row.
+
+    ``unique_id`` is unchanged. Without ``translation_key``, YAML ``name`` is
+    the entity name. With a key, Home Assistant resolves
+    ``entity.<platform>.<translation_key>.name`` (English belongs in
+    ``translations/en.json``). ``_attr_name`` must be absent in that case:
+    Home Assistant gives it precedence over entity-name translations.
+    """
+    key = str(register_config.get("translation_key") or "").strip()
+    entity._attr_has_entity_name = True
+    if key:
+        entity._attr_translation_key = key
+        # Remove only an instance attribute. Do not alter a class attribute;
+        # template-backed platform classes do not define one.
+        if "_attr_name" in vars(entity):
+            del entity._attr_name
+    else:
+        entity._attr_name = fallback_name
+    entity._attr_entity_registry_enabled_default = template_enabled_by_default(
+        register_config
+    )
+
+
 def process_template_entities_with_prefix(
     entities: list, prefix: str, template_name: str = "unknown"
 ) -> list:
@@ -979,11 +1023,14 @@ def create_device_info_dict(
         firmware_version = "1.0.0"
 
     selected = (model or "").strip()
-    display_model = selected or template_name
-    display_manufacturer = (manufacturer or "").strip() or "Modbus Manager"
-    # Prefer the probed/selected model as the device name; otherwise keep prefix
-    # so entity friendly names stay short on templates without valid_models.
-    display_name = selected or prefix
+    if str(template_name) == GENERIC_TEMPLATE_SENTINEL:
+        display_model = selected or "Generic Modbus Device"
+        display_manufacturer = (manufacturer or "").strip() or "Generic"
+        display_name = selected or prefix
+    else:
+        display_model = selected or template_name
+        display_manufacturer = (manufacturer or "").strip() or "Modbus Manager"
+        display_name = selected or prefix
 
     info: Dict[str, Any] = {
         "identifiers": {(DOMAIN, device_identifier)},
@@ -1020,6 +1067,7 @@ async def async_register_entry_devices(hass: HomeAssistant, entry: ConfigEntry) 
         return
 
     host, port = entry_host_port(entry)
+    from .generic_device import is_generic_device_template
     from .template_loader import get_template_by_name
 
     ordered = sorted(
@@ -1036,12 +1084,18 @@ async def async_register_entry_devices(hass: HomeAssistant, entry: ConfigEntry) 
     for device in ordered:
         template_name = str(device.get("template") or "template")
         manufacturer = None
-        try:
-            template = await get_template_by_name(template_name)
-        except Exception:
-            template = None
-        if isinstance(template, dict):
-            manufacturer = template.get("manufacturer")
+        model = device.get("selected_model")
+        if is_generic_device_template(template_name):
+            manufacturer = "Generic"
+            model = model or "Generic Modbus Device"
+            template_name = "Generic Modbus Device"
+        else:
+            try:
+                template = await get_template_by_name(template_name)
+            except Exception:
+                template = None
+            if isinstance(template, dict):
+                manufacturer = template.get("manufacturer")
         via_tuple = via_device_tuple(device, devices, host, port)
         info = create_device_info_dict(
             hass=hass,

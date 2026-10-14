@@ -183,7 +183,29 @@ data:
 
 ---
 
-### 5. `modbus_manager.read_device_identification`
+### 5. `modbus_manager.export_generic_device`
+
+**Description:** Write a Generic Device as a normal Modbus Manager YAML template. `unique_id` suffixes are unchanged. The file is stored in `config/modbus_manager/templates/`. A persistent notification includes a **signed** download link (`/api/modbus_manager/generic_export/<file>.yaml?authSig=…`, valid 1 hour). Does **not** push to GitHub.
+
+**Service Call:**
+```yaml
+service: modbus_manager.export_generic_device
+data:
+  prefix: "gen"
+```
+
+**Parameters:**
+- `entry_id` (optional): Hub config entry ID
+- `device_entry_id` (optional): Generic device id on a multi-device hub
+- `prefix` (optional): Device prefix
+
+If several generic devices exist, pass one of these so the service can pick one.
+
+**When to use:** After configuring registers in the Generic Device UI, before turning the map into a YAML template (reload templates, then add that template as a device). Options UI, map/flags, and signed download: [Generic Device](README_generic_device.md).
+
+---
+
+### 6. `modbus_manager.read_device_identification`
 
 **Description:** Standalone diagnostic for **Modbus FC43** (function code **0x2B**, MEI *Read Device Identification*). The service opens a **short-lived connection** (Modbus **TCP**, **RTU over TCP**, or **serial RTU**), asks the device for identification strings (vendor, product code, firmware version, and more), then closes the connection.
 
@@ -457,16 +479,16 @@ For Schneider and similar BMS devices, **`basic`** is often enough; if the vendo
 
 ---
 
-### 6. Device removal via subentry delete
+### 6. Device removal (Options)
 
-**Description:** Per-device removal is now handled directly in Home Assistant UI by deleting the device subentry.
+**Description:** Drop one device from a hub without deleting the hub. Config subentries are not used for this (they are detached so the Hubs UI stays flat).
 
 **How to use:**
-- Open the Modbus Manager entry
-- Select the device subentry
-- Use delete/remove in the subentry menu
+- Open the Modbus Manager hub → **Configure**
+- **Remove device** (only when the hub has at least two devices)
+- Pick the device, tick confirm
 
-This updates the underlying `devices[]` data and the removed device does not return after restart.
+This updates `devices[]`. The last remaining device cannot be removed — delete the hub instead. Other devices and Combined Device entries stay.
 
 ---
 
@@ -478,7 +500,7 @@ The following services have been removed as they were duplicates, unnecessary, o
 - **`modbus_manager.get_performance`** - Removed (use `performance_monitor` instead)
 - **`modbus_manager.reset_performance`** - Removed (use `performance_reset` instead)
 - **`modbus_manager.register_optimize`** - Removed (register optimization is automatic)
-- **`modbus_manager.remove_device`** - Removed (use subentry delete in UI)
+- **`modbus_manager.remove_device`** - Removed (use Options → **Remove device**)
 
 ---
 

@@ -14,6 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import ModbusCoordinator
 from .device_utils import (
+    apply_template_entity_display,
     create_base_extra_state_attributes,
     create_device_info_dict,
     generate_unique_id,
@@ -39,10 +40,22 @@ class ModbusCoordinatorSelect(CoordinatorEntity, SelectEntity):
         super().__init__(coordinator)
         self.register_config = register_config
         self._attr_device_info = DeviceInfo(**device_info)
+        # A translated entity deliberately has no instance ``_attr_name``:
+        # Home Assistant uses the absent attribute to reach its translation
+        # lookup. Keep an independent label for diagnostics instead.
+        self._log_label = str(
+            register_config.get("name")
+            or register_config.get("unique_id")
+            or "Unknown Select"
+        )
 
         # Set entity properties from register config
         self._attr_has_entity_name = True
-        self._attr_name = register_config.get("name", "Unknown Select")
+        apply_template_entity_display(
+            self,
+            register_config,
+            fallback_name=register_config.get("name", "Unknown Select"),
+        )
         self._attr_unique_id = register_config.get("unique_id", "unknown")
         default_entity_id = register_config.get("default_entity_id")
         if default_entity_id:
@@ -110,7 +123,7 @@ class ModbusCoordinatorSelect(CoordinatorEntity, SelectEntity):
 
         _LOGGER.debug(
             "ModbusCoordinatorSelect created: %s (key: %s)",
-            self._attr_name,
+            self._log_label,
             self.register_key,
         )
 
@@ -138,7 +151,7 @@ class ModbusCoordinatorSelect(CoordinatorEntity, SelectEntity):
                         self._attr_current_option = None
                         _LOGGER.debug(
                             "Select %s: Value %s not found in options - state unknown",
-                            self._attr_name,
+                            self._log_label,
                             processed_value,
                         )
                     else:
@@ -151,16 +164,16 @@ class ModbusCoordinatorSelect(CoordinatorEntity, SelectEntity):
                     #  )
                 else:
                     self._attr_current_option = None
-                    _LOGGER.debug("Select %s: No processed value", self._attr_name)
+                    _LOGGER.debug("Select %s: No processed value", self._log_label)
             else:
                 self._attr_current_option = None
-                _LOGGER.debug("Select %s: No register data found", self._attr_name)
+                _LOGGER.debug("Select %s: No register data found", self._log_label)
 
             # Notify Home Assistant about the change
             self.async_write_ha_state()
 
         except Exception as e:
-            _LOGGER.error("Error updating select %s: %s", self._attr_name, str(e))
+            _LOGGER.error("Error updating select %s: %s", self._log_label, str(e))
             self._attr_current_option = None
 
     def _apply_value_mapping(self, value: Any) -> Any:
@@ -188,7 +201,7 @@ class ModbusCoordinatorSelect(CoordinatorEntity, SelectEntity):
                             "Mapped value %s to '%s' for %s",
                             int_value,
                             mapped_value,
-                            self._attr_name,
+                            self._log_label,
                         )
                         return mapped_value
                     elif str(int_value) in self._map:
@@ -198,14 +211,14 @@ class ModbusCoordinatorSelect(CoordinatorEntity, SelectEntity):
                             "Mapped value %s (as string) to '%s' for %s",
                             int_value,
                             mapped_value,
-                            self._attr_name,
+                            self._log_label,
                         )
                         return mapped_value
                     else:
                         _LOGGER.debug(
                             "Value %s not found in map for %s - will check other mappings",
                             int_value,
-                            self._attr_name,
+                            self._log_label,
                         )
                         # Continue to check flags and options
 
@@ -240,7 +253,7 @@ class ModbusCoordinatorSelect(CoordinatorEntity, SelectEntity):
                         _LOGGER.debug(
                             "Value %s not found in options for %s - returning None (unknown state)",
                             int_value,
-                            self._attr_name,
+                            self._log_label,
                         )
                         # Return None to indicate unknown state (HA-compliant)
                         return None
@@ -248,14 +261,14 @@ class ModbusCoordinatorSelect(CoordinatorEntity, SelectEntity):
             # No processing applied - return None for unknown state (HA-compliant)
             _LOGGER.debug(
                 "No value processing applied for %s, value %s not mapped - returning None (unknown state)",
-                self._attr_name,
+                self._log_label,
                 value,
             )
             return None
 
         except Exception as e:
             _LOGGER.error(
-                "Error in value processing for %s: %s", self._attr_name, str(e)
+                "Error in value processing for %s: %s", self._log_label, str(e)
             )
             return value
 
@@ -315,13 +328,13 @@ class ModbusCoordinatorSelect(CoordinatorEntity, SelectEntity):
 
             if numeric_value is None:
                 _LOGGER.error(
-                    "Option %s not found in mapping for %s", option, self._attr_name
+                    "Option %s not found in mapping for %s", option, self._log_label
                 )
                 return
 
             _LOGGER.debug(
                 "Writing select %s: option=%s, numeric_value=%d",
-                self._attr_name,
+                self._log_label,
                 option,
                 numeric_value,
             )
@@ -352,13 +365,13 @@ class ModbusCoordinatorSelect(CoordinatorEntity, SelectEntity):
             )
 
             if result:
-                _LOGGER.debug("Successfully set %s to %s", self._attr_name, option)
+                _LOGGER.debug("Successfully set %s to %s", self._log_label, option)
             else:
-                _LOGGER.error("Failed to set %s to %s", self._attr_name, option)
+                _LOGGER.error("Failed to set %s to %s", self._log_label, option)
 
         except Exception as e:
             _LOGGER.error(
-                "Error setting select %s to %s: %s", self._attr_name, option, str(e)
+                "Error setting select %s to %s: %s", self._log_label, option, str(e)
             )
 
     @property

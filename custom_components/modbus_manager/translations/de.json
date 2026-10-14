@@ -4,10 +4,11 @@
         "step": {
             "user": {
                 "title": "Modbus Manager",
-                "description": "Gerät an bekannter Adresse erkennen, Template selbst wählen oder Combined Device anlegen (kein Modbus-I/O).",
+                "description": "Gerät an bekannter Adresse erkennen, Template selbst wählen, generisches Gerät anlegen oder Combined Device anlegen (kein Modbus-I/O).",
                 "menu_options": {
                     "detect": "Gerät an bekannter Adresse erkennen",
                     "template": "Template selbst wählen",
+                    "generic_device": "Generisches Gerät anlegen",
                     "combined_device": "Combined Device (über Hub-Grenzen)"
                 },
                 "data": {
@@ -38,9 +39,83 @@
                     "template": "Geräte-Template"
                 }
             },
+            "generic_entity": {
+                "title": "Generischer Entitätstyp",
+                "description": "Bisher angelegt: {entity_count}. Nur Holding- und Input-Register (keine Coils).",
+                "data": {
+                    "entity_type": "Entitätstyp"
+                }
+            },
+            "generic_entity_core": {
+                "title": "Generisches Register",
+                "description": "Typ: {entity_type}. Adresse ist dieselbe Zahl wie YAML `address:` — das Modbus-Register, das gelesen wird, ohne Offset. unique_id ist der History-Schlüssel und darf später nicht wechseln.",
+                "data": {
+                    "unique_id": "unique_id (stabiler Slug)",
+                    "name": "Anzeigename",
+                    "address": "Modbus-Adresse (wie YAML address:)",
+                    "input_type": "Registertyp",
+                    "data_type": "Datentyp",
+                    "scan_interval": "Scan-Intervall (Sekunden)",
+                    "entity_category": "Entity-Kategorie",
+                    "icon": "Icon",
+                    "mm_group": "mm_group",
+                    "translation_key": "Translation-Key (optional)",
+                    "enabled_by_default": "Standardmäßig aktiviert"
+                }
+            },
+            "generic_entity_fields": {
+                "title": "Register-Zusatzfelder",
+                "description": "Typ: {entity_type}, Datentyp: {data_type}. Es erscheinen nur Felder, die zu dieser Kombination passen.",
+                "data": {
+                    "unique_id": "unique_id (stabiler Slug)",
+                    "name": "Anzeigename",
+                    "address": "Modbus-Adresse (wie YAML address:)",
+                    "input_type": "Registertyp",
+                    "data_type": "Datentyp",
+                    "count": "Anzahl Register",
+                    "scale": "Skalierung",
+                    "offset": "Offset",
+                    "precision": "Nachkommastellen",
+                    "unit_of_measurement": "Einheit",
+                    "device_class": "Geräteklasse",
+                    "state_class": "Zustandsklasse",
+                    "scan_interval": "Scan-Intervall (Sekunden)",
+                    "encoding": "String-Encoding (utf-8 oder hex)",
+                    "byte_order": "Byte-Reihenfolge",
+                    "swap": "Word-Swap",
+                    "entity_category": "Entity-Kategorie",
+                    "icon": "Icon",
+                    "mm_group": "mm_group",
+                    "bitmask": "Bitmaske",
+                    "bit_position": "Bit-Position",
+                    "map_text": "Map (eine Zeile, Komma: 0xAA: Enabled, 0x55: Disabled)",
+                    "flags_text": "Flags (Bitpositionen, Komma: 0: PV Generating, 1: Battery charging)",
+                    "read_function_code": "Read-Function-Code (3 oder 4)",
+                    "write_function_code": "Write-Function-Code (6 oder 16)",
+                    "never_resets": "Setzt nie zurück",
+                    "force_update": "Immer aktualisieren",
+                    "min_value": "Minimum",
+                    "max_value": "Maximum",
+                    "step": "Schrittweite",
+                    "write_value": "ON-Schreibwert",
+                    "write_value_off": "OFF-Schreibwert",
+                    "on_value": "ON-Zustand",
+                    "off_value": "OFF-Zustand",
+                    "button_press_value": "Button-Wert",
+                    "options_text": "Optionen (eine Zeile, Komma: 0: Off, 1: On)",
+                    "max_length": "Max. Länge (Bytes)"
+                }
+            },
+            "generic_entity_confirm": {
+                "title": "Weitere Entität?",
+                "description": "{entity_count} Entität(en) bereit. Weitere hinzufügen oder Hub anlegen.",
+                "data": {
+                    "action": "Weiter"
+                }
+            },
             "identify_confirm": {
                 "title": "Erkanntes Gerät bestätigen",
-                "description": "Gefunden: {found_name} unter {found_host}:{found_port}.\n\n{found_details}\n\nAbsenden übernimmt diese Werte. „Template selbst wählen“ ignoriert die Probe. Bestehende Hubs bleiben unverändert. Den Verbindungstyp können Sie später in den Optionen ändern.",
+                "description": "Gefunden: {found_name} unter {found_host}:{found_port}.\n\n{found_details}\n\nAbsenden übernimmt diese Werte. „Template selbst wählen“ ignoriert die Probe. Bestehende Hubs bleiben unverändert. Verbindungstyp (LAN / WiNet-S / RS485) hier bestätigen — WiNet ist der Dongle-Pfad, nicht TCP vs. RTU.",
                 "data": {
                     "template": "Geräte-Template",
                     "prefix": "Geräte-Präfix (muss eindeutig sein)",
@@ -48,6 +123,7 @@
                     "selected_model": "Modell",
                     "battery_slave_id": "Batterie Slave-ID",
                     "wallbox_slave_id": "Wallbox Slave-ID",
+                    "connection_type": "Verbindungstyp (LAN, WiNet-S oder RS485)",
                     "choose_template_instead": "Template selbst wählen (diesen Treffer ignorieren)"
                 }
             },
@@ -222,8 +298,9 @@
             },
             "reconfigure": {
                 "title": "Hub neu konfigurieren",
-                "description": "Kommunikationseinstellungen des Hubs aktualisieren",
+                "description": "Aktueller Verbindungstyp: {current_modbus_type}. Hier Modbus TCP ↔ RTU over TCP wechseln. Seriell RTU kann auf diesem Bildschirm nicht geändert werden. Host, Port und Geräte bleiben.",
                 "data": {
+                    "modbus_type": "Modbus-Verbindungstyp (TCP oder RTU over TCP)",
                     "prefix": "Geräte-Prefix",
                     "slave_id": "Slave ID",
                     "selected_model": "Modell auswählen",
@@ -268,7 +345,8 @@
             "no_device_definitions": "Keine Gerätedefinitionen gefunden",
             "same_source_selected": "Quelle A und Quelle B müssen unterschiedlich sein",
             "source_not_found": "Ausgewählter Quell-Entry existiert nicht mehr",
-            "invalid_pair": "Diese Quellen-Kombination wird nicht unterstützt"
+            "invalid_pair": "Diese Quellen-Kombination wird nicht unterstützt",
+            "invalid_generic_register": "Ungültiges Register. unique_id (Buchstabe + a-z/0-9/_), Register >= 1, nur Holding/Input."
         },
         "abort": {
             "no_device_definitions": "Es wurden keine Gerätedefinitionen gefunden. Bitte stellen Sie sicher, dass mindestens eine YAML-Datei im device_definitions Verzeichnis existiert.",
@@ -278,6 +356,7 @@
             "no_available_devices_for_subentry": "Alle Geräte sind bereits konfiguriert.",
             "template_not_found": "Template {template_name} nicht gefunden.",
             "no_registers": "Template {template_name} hat keine Entitäten definiert.",
+            "generic_no_registers": "Das generische Gerät braucht mindestens ein gültiges Register. {error}",
             "update_error": "Fehler beim Aktualisieren des Templates: {error}",
             "no_template_selected": "Kein Template ausgewählt",
             "device_added_to_existing_hub": "Gerät erfolgreich zum bestehenden Hub hinzugefügt. Ein Neustart ist erforderlich, um das neue Gerät zu aktivieren.",
@@ -293,18 +372,22 @@
                 "title": "Modbus-Manager-Optionen",
                 "description": "Was möchten Sie ändern?",
                 "menu_options": {
-                    "connection": "Verbindung — Host, Port und Timing",
+                    "connection": "Verbindung — Typ, Host, Port und Timing",
                     "inverter": "Wechselrichter — Modell, MPPT und Verbindung",
-                    "device": "Gerät — Heizkreis, Wallbox und Optionen",
+                    "device": "Geräte Optionen",
                     "battery": "Batterie — Modell, Prefix und Slave",
                     "battery_template": "Batterie — Template hinzufügen, wechseln oder entfernen",
-                    "reload_template": "Register-Templates neu laden"
+                    "reload_template": "Register-Templates neu laden",
+                    "generic_registers": "Generisches Gerät — Register hinzufügen oder bearbeiten",
+                    "generic_export": "Generisches Gerät — YAML-Template exportieren",
+                    "remove_device": "Gerät entfernen — vom Hub streichen"
                 }
             },
             "connection": {
                 "title": "Verbindung",
-                "description": "Modbus-TCP-Endpunkt und Kommunikationseinstellungen ändern. Abhängige Combined-Device-Einträge werden bei Endpunktänderung automatisch neu geladen.",
+                "description": "Aktueller Verbindungstyp: {current_modbus_type}. Hier Modbus TCP ↔ RTU over TCP wechseln. Host, Port und Geräte bleiben. Seriell RTU kann auf diesem Bildschirm nicht geändert werden. Combined-Device-Einträge werden bei Endpunktänderung neu geladen.",
                 "data": {
+                    "modbus_type": "Modbus-Verbindungstyp (TCP oder RTU over TCP)",
                     "host": "IP-Adresse / Hostname",
                     "port": "Modbus-TCP-Port",
                     "timeout": "Timeout in Sekunden",
@@ -395,26 +478,142 @@
                 "data": {
                     "battery_selection": "Battery Selection"
                 }
+            },
+            "generic_registers": {
+                "title": "Generische Register",
+                "description": "Gerät: {device}. Entitäten in diesem Entwurf: {entity_count}. Hinzufügen, bearbeiten oder entfernen, dann speichern zum Neuladen. unique_id bleibt beim Bearbeiten gleich. Entfernen löscht die Registry-Zeile nicht (History bleibt).",
+                "data": {
+                    "device_entry_id": "Gerät",
+                    "action": "Weiter"
+                }
+            },
+            "generic_opt_pick": {
+                "title": "Entität wählen",
+                "description": "Modus: {mode}. unique_id ist der History-Schlüssel.",
+                "data": {
+                    "unique_id": "Entität (unique_id)"
+                }
+            },
+            "generic_opt_remove": {
+                "title": "Register entfernen?",
+                "description": "{unique_id} von diesem generischen Gerät entfernen. Die Entity-Registry-Zeile bleibt; die Entität wird unavailable, damit die History nicht splittert.",
+                "data": {
+                    "confirm": "Von diesem Gerät entfernen"
+                }
+            },
+            "generic_opt_entity": {
+                "title": "Generischer Entitätstyp",
+                "description": "Entitäten in diesem Entwurf: {entity_count}. Nur Holding- und Input-Register (keine Coils).",
+                "data": {
+                    "entity_type": "Entitätstyp"
+                }
+            },
+            "generic_opt_core": {
+                "title": "Generisches Register",
+                "description": "Typ: {entity_type}. unique_id beim Bearbeiten ist {unique_id} und kann nicht wechseln. Adresse ist dieselbe Zahl wie YAML address: — das gelesene Modbus-Register.",
+                "data": {
+                    "unique_id": "unique_id (stabiler Slug)",
+                    "name": "Anzeigename",
+                    "address": "Modbus-Adresse (wie YAML address:)",
+                    "input_type": "Registertyp",
+                    "data_type": "Datentyp",
+                    "scan_interval": "Scan-Intervall (Sekunden)",
+                    "entity_category": "Entity-Kategorie",
+                    "icon": "Icon",
+                    "mm_group": "mm_group",
+                    "translation_key": "Translation-Key (optional)",
+                    "enabled_by_default": "Standardmäßig aktiviert"
+                }
+            },
+            "generic_opt_fields": {
+                "title": "Register-Zusatzfelder",
+                "description": "Typ: {entity_type}, Datentyp: {data_type}, unique_id: {unique_id}. Es erscheinen nur Felder, die zu dieser Kombination passen.",
+                "data": {
+                    "count": "Anzahl Register",
+                    "scale": "Skalierung",
+                    "offset": "Offset",
+                    "precision": "Nachkommastellen",
+                    "unit_of_measurement": "Einheit",
+                    "device_class": "Geräteklasse",
+                    "state_class": "Zustandsklasse",
+                    "encoding": "String-Encoding (utf-8 oder hex)",
+                    "byte_order": "Byte-Reihenfolge",
+                    "swap": "Word-Swap",
+                    "bitmask": "Bitmaske",
+                    "bit_position": "Bit-Position",
+                    "map_text": "Map (eine Zeile, Komma: 0xAA: Enabled, 0x55: Disabled)",
+                    "flags_text": "Flags (Bitpositionen, Komma: 0: PV Generating, 1: Battery charging)",
+                    "read_function_code": "Read-Function-Code (3 oder 4)",
+                    "write_function_code": "Write-Function-Code (6 oder 16)",
+                    "never_resets": "Setzt nie zurück",
+                    "force_update": "Immer aktualisieren",
+                    "min_value": "Minimum",
+                    "max_value": "Maximum",
+                    "step": "Schrittweite",
+                    "write_value": "ON-Schreibwert",
+                    "write_value_off": "OFF-Schreibwert",
+                    "on_value": "ON-Zustand",
+                    "off_value": "OFF-Zustand",
+                    "button_press_value": "Button-Wert",
+                    "options_text": "Optionen (eine Zeile, Komma: 0: Off, 1: On)",
+                    "max_length": "Max. Länge (Bytes)"
+                }
+            },
+            "generic_export": {
+                "title": "YAML-Template exportieren",
+                "description": "Gerät: {device}. Schreibt ein normales Modbus-Manager-Template (gleiche unique_id-Suffixe) nach config/modbus_manager/templates/. Download ist ein signierter Link in der Benachrichtigung (1 Stunde gültig).",
+                "data": {
+                    "device_entry_id": "Gerät",
+                    "confirm": "YAML schreiben und benachrichtigen"
+                },
+                "menu_options": {
+                    "generic_export_write": "YAML schreiben und benachrichtigen",
+                    "generic_export_cancel": "Abbrechen",
+                    "generic_export_close": "Fertig — YAML geschrieben. Download YAML in der Benachrichtigung (Link 1 Stunde gültig)."
+                }
+            },
+            "remove_device": {
+                "title": "Gerät entfernen",
+                "description": "Gerät wählen, das von diesem Hub gestrichen wird. Andere Geräte bleiben. Das letzte Gerät kann nicht entfernt werden — stattdessen den Hub löschen.",
+                "data": {
+                    "device_entry_id": "Gerät"
+                }
+            },
+            "remove_device_confirm": {
+                "title": "Dieses Gerät entfernen?",
+                "description": "{device} von diesem Hub entfernen. Der Home-Assistant-Geräteintrag wird gelöscht. Entity-Registry-Zeilen dieses Geräts werden beim Reload bereinigt. Andere Geräte und Combined-Device-Einträge bleiben unverändert.",
+                "data": {
+                    "confirm": "Dieses Gerät vom Hub entfernen"
+                }
             }
         },
         "error": {
             "endpoint_in_use": "Ein anderer Modbus-Manager-Hub nutzt diese IP und diesen Port bereits.",
             "invalid_host": "Host ist erforderlich.",
             "invalid_port": "Port muss eine gültige Zahl sein.",
-            "already_configured": "Dieses Prefix wird bereits von einem anderen Gerät verwendet."
+            "already_configured": "Dieses Prefix wird bereits von einem anderen Gerät verwendet.",
+            "invalid_generic_register": "Ungültiges Register. unique_id (Buchstabe + a-z/0-9/_) und nur Holding/Input.",
+            "duplicate_generic_unique_id": "Diese unique_id ist auf diesem Gerät schon vergeben.",
+            "last_generic_register": "Ein generisches Gerät braucht mindestens ein Register.",
+            "generic_export_failed": "YAML-Dateien konnten nicht geschrieben werden.",
+            "unknown_device": "Dieses Gerät ist nicht auf diesem Hub.",
+            "not_confirmed": "Zum Entfernen die Bestätigung ankreuzen."
         },
         "abort": {
             "combined_device": "Combined Devices haben keine Modbus-Verbindung. IP/Port an den Quell-Hub-Einträgen ändern.",
+            "cannot_remove_last_device": "Das letzte Gerät auf einem Hub kann nicht entfernt werden. Stattdessen den Hub löschen.",
             "config_error": "Dieser Hub hat kein passendes Gerät zum Konfigurieren.",
             "template_not_found": "Template {template_name} nicht gefunden.",
-            "update_error": "Fehler beim Aktualisieren der Templates: {error}"
+            "update_error": "Fehler beim Aktualisieren der Templates: {error}",
+            "generic_export_done": "YAML geschrieben. Download YAML in der Benachrichtigung (Link 1 Stunde gültig). Templates neu laden, um es als YAML-Gerät zu nutzen.",
+            "generic_export_failed": "YAML-Dateien konnten nicht geschrieben werden."
         }
     },
     "config_subentries": {
         "step": {
             "user": {
                 "title": "Gerät hinzufügen",
-                "description": "Wählen Sie die Hub-Verbindung, an die das Gerät soll, danach Template, Präfix und Slave-ID.",
+                "description": "Dieses Gerät nutzt die Verbindung des Hubs. Wählen Sie Generisches Modbus-Gerät oder ein YAML-Template, danach Präfix und Slave-ID.",
                 "data": {
                     "template": "Geräte-Template",
                     "prefix": "Geräte-Prefix",
@@ -460,6 +659,71 @@
                     "pv2heat_enabled": "PV2Heat-Register aktivieren",
                     "heat_meter_enabled": "Wärmemengenzähler-Register aktivieren"
                 }
+            },
+            "generic_entity": {
+                "title": "Generischer Entitätstyp",
+                "description": "Bisher angelegt: {entity_count}. Nur Holding- und Input-Register (keine Coils).",
+                "data": {
+                    "entity_type": "Entitätstyp"
+                }
+            },
+            "generic_entity_core": {
+                "title": "Generisches Register",
+                "description": "Typ: {entity_type}. Adresse ist dieselbe Zahl wie YAML `address:` — das Modbus-Register, das gelesen wird, ohne Offset. unique_id ist der History-Schlüssel und darf später nicht wechseln.",
+                "data": {
+                    "unique_id": "unique_id (stabiler Slug)",
+                    "name": "Anzeigename",
+                    "address": "Modbus-Adresse (wie YAML address:)",
+                    "input_type": "Registertyp",
+                    "data_type": "Datentyp",
+                    "scan_interval": "Scan-Intervall (Sekunden)",
+                    "entity_category": "Entity-Kategorie",
+                    "icon": "Icon",
+                    "mm_group": "mm_group",
+                    "translation_key": "Translation-Key (optional)",
+                    "enabled_by_default": "Standardmäßig aktiviert"
+                }
+            },
+            "generic_entity_fields": {
+                "title": "Register-Zusatzfelder",
+                "description": "Typ: {entity_type}, Datentyp: {data_type}. Es erscheinen nur Felder, die zu dieser Kombination passen.",
+                "data": {
+                    "count": "Anzahl Register",
+                    "scale": "Skalierung",
+                    "offset": "Offset",
+                    "precision": "Nachkommastellen",
+                    "unit_of_measurement": "Einheit",
+                    "device_class": "Geräteklasse",
+                    "state_class": "Zustandsklasse",
+                    "encoding": "String-Encoding (utf-8 oder hex)",
+                    "byte_order": "Byte-Reihenfolge",
+                    "swap": "Word-Swap",
+                    "bitmask": "Bitmaske",
+                    "bit_position": "Bit-Position",
+                    "map_text": "Map (eine Zeile, Komma: 0xAA: Enabled, 0x55: Disabled)",
+                    "flags_text": "Flags (Bitpositionen, Komma: 0: PV Generating, 1: Battery charging)",
+                    "read_function_code": "Read-Function-Code (3 oder 4)",
+                    "write_function_code": "Write-Function-Code (6 oder 16)",
+                    "never_resets": "Setzt nie zurück",
+                    "force_update": "Immer aktualisieren",
+                    "min_value": "Minimum",
+                    "max_value": "Maximum",
+                    "step": "Schrittweite",
+                    "write_value": "ON-Schreibwert",
+                    "write_value_off": "OFF-Schreibwert",
+                    "on_value": "ON-Zustand",
+                    "off_value": "OFF-Zustand",
+                    "button_press_value": "Button-Wert",
+                    "options_text": "Optionen (eine Zeile, Komma: 0: Off, 1: On)",
+                    "max_length": "Max. Länge (Bytes)"
+                }
+            },
+            "generic_entity_confirm": {
+                "title": "Weitere Entität?",
+                "description": "{entity_count} Entität(en) bereit. Weitere hinzufügen oder das Gerät am Hub anlegen.",
+                "data": {
+                    "action": "Weiter"
+                }
             }
         },
         "abort": {
@@ -471,7 +735,8 @@
             "nested_device_attached": "Gerät unter dem Wechselrichter hinzugefügt. Es gibt keine eigene Hub-Zeile.",
             "device_attached": "Gerät zum Hub hinzugefügt.",
             "combined_device": "Combined Devices haben keine Modbus-Verbindung. Gerät am Quell-Hub hinzufügen.",
-            "no_templates": "Keine Geräte-Templates gefunden."
+            "no_templates": "Keine Geräte-Templates gefunden.",
+            "generic_no_registers": "Ein generisches Gerät braucht mindestens ein gültiges Register. {error}"
         },
         "device": {
             "title": "Gerät hinzufügen",
@@ -483,7 +748,7 @@
             "step": {
                 "user": {
                     "title": "Gerät hinzufügen",
-                    "description": "Das Gerät hängt an dieser Hub-Verbindung (Host/Port oder seriell). Template wählen, danach Präfix und Slave-ID.",
+                    "description": "Das Gerät hängt an dieser Hub-Verbindung (Host/Port oder seriell). Generisches Modbus-Gerät oder YAML-Template wählen, danach Präfix und Slave-ID.",
                     "data": {
                         "template": "Geräte-Template",
                         "prefix": "Geräte-Prefix",
@@ -529,6 +794,71 @@
                         "pv2heat_enabled": "PV2Heat-Register aktivieren",
                         "heat_meter_enabled": "Wärmemengenzähler-Register aktivieren"
                     }
+                },
+                "generic_entity": {
+                    "title": "Generischer Entitätstyp",
+                    "description": "Bisher angelegt: {entity_count}. Nur Holding- und Input-Register (keine Coils).",
+                    "data": {
+                        "entity_type": "Entitätstyp"
+                    }
+                },
+                "generic_entity_core": {
+                    "title": "Generisches Register",
+                    "description": "Typ: {entity_type}. Adresse ist dieselbe Zahl wie YAML `address:` — das Modbus-Register, das gelesen wird, ohne Offset. unique_id ist der History-Schlüssel und darf später nicht wechseln.",
+                    "data": {
+                        "unique_id": "unique_id (stabiler Slug)",
+                        "name": "Anzeigename",
+                        "address": "Modbus-Adresse (wie YAML address:)",
+                        "input_type": "Registertyp",
+                        "data_type": "Datentyp",
+                        "scan_interval": "Scan-Intervall (Sekunden)",
+                        "entity_category": "Entity-Kategorie",
+                        "icon": "Icon",
+                        "mm_group": "mm_group",
+                        "translation_key": "Translation-Key (optional)",
+                        "enabled_by_default": "Standardmäßig aktiviert"
+                    }
+                },
+                "generic_entity_fields": {
+                    "title": "Register-Zusatzfelder",
+                    "description": "Typ: {entity_type}, Datentyp: {data_type}. Es erscheinen nur Felder, die zu dieser Kombination passen.",
+                    "data": {
+                        "count": "Anzahl Register",
+                        "scale": "Skalierung",
+                        "offset": "Offset",
+                        "precision": "Nachkommastellen",
+                        "unit_of_measurement": "Einheit",
+                        "device_class": "Geräteklasse",
+                        "state_class": "Zustandsklasse",
+                        "encoding": "String-Encoding (utf-8 oder hex)",
+                        "byte_order": "Byte-Reihenfolge",
+                        "swap": "Word-Swap",
+                        "bitmask": "Bitmaske",
+                        "bit_position": "Bit-Position",
+                        "map_text": "Map (eine Zeile, Komma: 0xAA: Enabled, 0x55: Disabled)",
+                        "flags_text": "Flags (Bitpositionen, Komma: 0: PV Generating, 1: Battery charging)",
+                        "read_function_code": "Read-Function-Code (3 oder 4)",
+                        "write_function_code": "Write-Function-Code (6 oder 16)",
+                        "never_resets": "Setzt nie zurück",
+                        "force_update": "Immer aktualisieren",
+                        "min_value": "Minimum",
+                        "max_value": "Maximum",
+                        "step": "Schrittweite",
+                        "write_value": "ON-Schreibwert",
+                        "write_value_off": "OFF-Schreibwert",
+                        "on_value": "ON-Zustand",
+                        "off_value": "OFF-Zustand",
+                        "button_press_value": "Button-Wert",
+                        "options_text": "Optionen (eine Zeile, Komma: 0: Off, 1: On)",
+                        "max_length": "Max. Länge (Bytes)"
+                    }
+                },
+                "generic_entity_confirm": {
+                    "title": "Weitere Entität?",
+                    "description": "{entity_count} Entität(en) bereit. Weitere hinzufügen oder das Gerät am Hub anlegen.",
+                    "data": {
+                        "action": "Weiter"
+                    }
                 }
             },
             "abort": {
@@ -540,8 +870,15 @@
                 "nested_device_attached": "Gerät unter dem Wechselrichter hinzugefügt. Es gibt keine eigene Hub-Zeile.",
                 "device_attached": "Gerät zum Hub hinzugefügt.",
                 "combined_device": "Combined Devices haben keine Modbus-Verbindung. Gerät am Quell-Hub hinzufügen.",
-                "no_templates": "Keine Geräte-Templates gefunden."
+                "no_templates": "Keine Geräte-Templates gefunden.",
+                "generic_no_registers": "Ein generisches Gerät braucht mindestens ein gültiges Register. {error}"
+            },
+            "error": {
+                "invalid_generic_register": "Ungültiges Register. unique_id (Buchstabe + a-z/0-9/_) und nur Holding/Input."
             }
+        },
+        "error": {
+            "invalid_generic_register": "Ungültiges Register. unique_id (Buchstabe + a-z/0-9/_) und nur Holding/Input."
         }
     },
     "device": {
@@ -774,7 +1111,42 @@
             "temperature": "Temperatur",
             "charging_current_limit": "Ladestrom Limit",
             "start_stop_charging": "Laden Start/Stop",
-            "reset_error": "Fehler zurücksetzen"
+            "reset_error": "Fehler zurücksetzen",
+            "pichler_lg_es2020_outdoor_air_temperature": {"name": "Außenlufttemperatur"},
+            "pichler_lg_es2020_exhaust_air_temperature": {"name": "Fortlufttemperatur"},
+            "pichler_lg_es2020_extract_air_temperature": {"name": "Ablufttemperatur"},
+            "pichler_lg_es2020_supply_air_temperature": {"name": "Zulufttemperatur"},
+            "pichler_lg_es2020_external_supply_air_temperature": {"name": "Externe Zulufttemperatur"},
+            "pichler_lg_es2020_supply_airflow": {"name": "Zuluftvolumenstrom"},
+            "pichler_lg_es2020_extract_airflow": {"name": "Abluftvolumenstrom"},
+            "pichler_lg_es2020_operating_status": {"name": "Betriebsstatus"},
+            "pichler_lg_es2020_filter_remaining_time": {"name": "Filterrestlaufzeit"},
+            "pichler_lg_es2020_combined_coil_mixer_control_signal": {"name": "Stellsignal Kombiregister-Mischer"},
+            "pichler_lg_es2020_cooling_coil_mixer_control_signal": {"name": "Stellsignal Kühlregister-Mischer"},
+            "pichler_lg_es2020_calculated_supply_air_temperature_setpoint": {"name": "Berechneter Zulufttemperatur-Sollwert"}
+            ,"pichler_lg_es2020_device_model": {"name": "Gerätemodell"}
+            ,"pichler_lg_es2020_controller_firmware_version": {"name": "Firmware-Version des Steuergeräts"}
+            ,"pichler_lg_es2020_preheater_temperature": {"name": "Vorheizregistertemperatur"}
+            ,"pichler_lg_es2020_supply_airflow_setpoint": {"name": "Zuluftvolumenstrom-Sollwert"}
+            ,"pichler_lg_es2020_extract_airflow_setpoint": {"name": "Abluftvolumenstrom-Sollwert"}
+            ,"pichler_lg_es2020_current_ventilation_level": {"name": "Aktuelle Lüftungsstufe"},
+            "inepro_pro380_l1_voltage": {"name": "Spannung L1"},
+            "inepro_pro380_l2_voltage": {"name": "Spannung L2"},
+            "inepro_pro380_l3_voltage": {"name": "Spannung L3"},
+            "inepro_pro380_grid_frequency": {"name": "Netzfrequenz"},
+            "inepro_pro380_l1_current": {"name": "Strom L1"},
+            "inepro_pro380_l2_current": {"name": "Strom L2"},
+            "inepro_pro380_l3_current": {"name": "Strom L3"},
+            "inepro_pro380_total_active_power": {"name": "Gesamtwirkleistung"},
+            "inepro_pro380_l1_active_power": {"name": "Wirkleistung L1"},
+            "inepro_pro380_l2_active_power": {"name": "Wirkleistung L2"},
+            "inepro_pro380_l3_active_power": {"name": "Wirkleistung L3"},
+            "inepro_pro380_total_power_factor": {"name": "Gesamtleistungsfaktor"},
+            "inepro_pro380_l1_power_factor": {"name": "Leistungsfaktor L1"},
+            "inepro_pro380_l2_power_factor": {"name": "Leistungsfaktor L2"},
+            "inepro_pro380_l3_power_factor": {"name": "Leistungsfaktor L3"},
+            "inepro_pro380_imported_energy": {"name": "Bezugsenergie"},
+            "inepro_pro380_exported_energy": {"name": "Einspeiseenergie"}
         },
         "binary_sensor": {
             "combined_source_a_available": {
@@ -788,7 +1160,48 @@
             },
             "combined_pv_generating_any": {
                 "name": "PV-Erzeugung bei mindestens einer Quelle"
-            }
+            },
+            "pichler_lg_es2020_heating_demand": {"name": "Heizanforderung"},
+            "pichler_lg_es2020_cooling_demand": {"name": "Kühlanforderung"},
+            "pichler_lg_es2020_combined_cooling_coil_circulation_pump": {"name": "Umwälzpumpe Kombi-/Kühlregister"},
+            "pichler_lg_es2020_external_supply_air_temperature_sensor_fault": {"name": "Störung externer Zulufttemperaturfühler"}
+            ,"pichler_lg_es2020_fans_running": {"name": "Ventilatoren in Betrieb"}
+            ,"pichler_lg_es2020_bypass_damper_open": {"name": "Bypassklappe geöffnet"}
+            ,"pichler_lg_es2020_aggregate_fault": {"name": "Gerätestörung"}
+            ,"pichler_lg_es2020_filter_indication": {"name": "Filteranzeige"}
+            ,"pichler_lg_es2020_preheater_relay": {"name": "Vorheizregister-Relais"}
+            ,"pichler_lg_es2020_outdoor_exhaust_dampers_open": {"name": "Außen- und Fortluftklappen geöffnet"}
+            ,"pichler_lg_es2020_heating_pump_running": {"name": "Heizungspumpe in Betrieb"}
+            ,"pichler_lg_es2020_external_off_or_fire_alarm": {"name": "Extern Aus oder Brandalarm"}
+            ,"pichler_lg_es2020_external_level_3_active": {"name": "Externe Lüftungsstufe 3 aktiv"}
+            ,"pichler_lg_es2020_geothermal_heat_exchanger_fault": {"name": "Störung Erdwärmetauscher"}
+            ,"pichler_lg_es2020_operating_panel_fault": {"name": "Störung Bediengerät"}
+            ,"pichler_lg_es2020_reheater_frost_protection_fault": {"name": "Frostschutzstörung Nachheizregister"}
+            ,"pichler_lg_es2020_exhaust_air_fan_fault": {"name": "Störung Fortluftventilator"}
+            ,"pichler_lg_es2020_supply_air_fan_fault": {"name": "Störung Zuluftventilator"}
+            ,"pichler_lg_es2020_outdoor_air_temperature_sensor_fault": {"name": "Störung Außenlufttemperaturfühler"}
+            ,"pichler_lg_es2020_exhaust_air_temperature_sensor_fault": {"name": "Störung Fortlufttemperaturfühler"}
+            ,"pichler_lg_es2020_extract_air_temperature_sensor_fault": {"name": "Störung Ablufttemperaturfühler"}
+            ,"pichler_lg_es2020_supply_air_temperature_sensor_fault": {"name": "Störung Zulufttemperaturfühler"}
+            ,"pichler_lg_es2020_preheater_temperature_sensor_fault": {"name": "Störung Vorheizregistertemperaturfühler"}
+            ,"pichler_lg_es2020_external_outdoor_air_temperature_sensor_fault": {"name": "Störung externer Außenlufttemperaturfühler"}
+            ,"pichler_lg_es2020_external_room_temperature_sensor_fault": {"name": "Störung externer Raumtemperaturfühler"}
+            ,"pichler_lg_es2020_fan_communication_fault": {"name": "Kommunikationsstörung Ventilatoren"}
+            ,"pichler_lg_es2020_low_supply_air_temperature_fault": {"name": "Störung niedrige Zulufttemperatur"}
+            ,"pichler_lg_es2020_filter_fault": {"name": "Filterstörung"}
+            ,"pichler_lg_es2020_low_preheater_temperature_fault": {"name": "Störung niedrige Vorheizregistertemperatur"}
+            ,"pichler_lg_es2020_reheater_frost_protection_active": {"name": "Frostschutz Nachheizregister aktiv"}
+            ,"pichler_lg_es2020_modbus_sensor_fault": {"name": "Störung Modbus-Sensor"}
+            ,"pichler_lg_es2020_external_frost_protection_active": {"name": "Externer Frostschutz aktiv"}
+        },
+        "select": {
+            "pichler_lg_es2020_ventilation_level": {"name": "Lüftungsstufe"}
+        },
+        "number": {
+            "pichler_lg_es2020_level_1_airflow_setpoint": {"name": "Luftvolumenstrom-Sollwert Stufe 1"},
+            "pichler_lg_es2020_level_2_airflow_setpoint": {"name": "Luftvolumenstrom-Sollwert Stufe 2"},
+            "pichler_lg_es2020_level_3_airflow_setpoint": {"name": "Luftvolumenstrom-Sollwert Stufe 3"},
+            "pichler_lg_es2020_basic_ventilation_airflow_setpoint": {"name": "Luftvolumenstrom-Sollwert Grundlüftung"}
         },
         "input_boolean": {
             "allow_battery_car_charging": {
@@ -900,6 +1313,24 @@
                 "notify": {
                     "name": "Benachrichtigung",
                     "description": "Ergebnis als Text in persistenter Benachrichtigung"
+                }
+            }
+        },
+        "export_generic_device": {
+            "name": "Generisches Gerät als YAML exportieren",
+            "description": "Generic Device als YAML-Template schreiben (Custom-Templates) und einen signierten Download-Link in der Benachrichtigung zeigen.",
+            "fields": {
+                "entry_id": {
+                    "name": "Config-Entry-ID",
+                    "description": "Hub-Entry-ID (optional, wenn nur ein Generic Device existiert)"
+                },
+                "device_entry_id": {
+                    "name": "Device-Entry-ID",
+                    "description": "unique_id des Generic Device an einem Multi-Device-Hub (optional)"
+                },
+                "prefix": {
+                    "name": "Prefix",
+                    "description": "Prefix des Generic Device (optional)"
                 }
             }
         }

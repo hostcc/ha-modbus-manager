@@ -43,6 +43,11 @@ from .device_utils import (
     resolve_firmware_profile_version,
     via_device_tuple,
 )
+from .generic_device import (
+    GenericRegisterError,
+    is_generic_device_template,
+    template_from_generic_device,
+)
 from .logger import ModbusManagerLogger
 from .modbus_utils import (
     decode_string_registers,
@@ -687,11 +692,21 @@ class ModbusCoordinator(DataUpdateCoordinator):
                     device.get("firmware_version", "unknown"),
                 )
 
-                # Load template
-                template = await get_template_by_name(template_name)
-                if not template:
-                    _LOGGER.error("Template %s not found for device", template_name)
-                    continue
+                if is_generic_device_template(template_name):
+                    try:
+                        template = template_from_generic_device(device)
+                    except GenericRegisterError as err:
+                        _LOGGER.error(
+                            "Generic device %s has invalid registers: %s",
+                            prefix,
+                            err,
+                        )
+                        continue
+                else:
+                    template = await get_template_by_name(template_name)
+                    if not template:
+                        _LOGGER.error("Template %s not found for device", template_name)
+                        continue
                 self._template_batch_caps[template_name] = template.get(
                     "max_register_read", DEFAULT_MAX_REGISTER_READ
                 )
@@ -1060,7 +1075,12 @@ class ModbusCoordinator(DataUpdateCoordinator):
                     firmware_version=device_firmware_version,
                     config_entry_id=self.entry.entry_id,
                     manufacturer=template.get("manufacturer"),
-                    model=selected_model,
+                    model=selected_model
+                    or (
+                        template.get("display_name")
+                        if is_generic_device_template(template_name)
+                        else None
+                    ),
                     via_device=via_device_tuple(device, devices, host, port),
                 )
 
@@ -2366,11 +2386,12 @@ class ModbusCoordinator(DataUpdateCoordinator):
             intervals_to_update = []
 
             for interval, registers in self._cached_registers_by_interval.items():
-                last_update = self._last_update_time.get(interval, 0)
-                time_since_update = current_time - last_update
+                # A group that was never read is due now: the loop clock is
+                # monotonic, so 0 is not "never" (it may still be < interval)
+                last_update = self._last_update_time.get(interval)
 
                 # Check if this interval group is due for update
-                if time_since_update >= interval:
+                if last_update is None or current_time - last_update >= interval:
                     registers_to_read.extend(registers)
                     intervals_to_update.append((interval, len(registers)))
 

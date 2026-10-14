@@ -1,5 +1,6 @@
 """Constants for the Modbus Manager integration."""
 
+from datetime import timedelta
 from enum import Enum, StrEnum
 from typing import Final
 
@@ -11,6 +12,11 @@ CONF_ENTITY_ID_STRATEGY: Final = "entity_id_strategy"
 CONF_ENTRY_TYPE: Final = "entry_type"
 ENTRY_TYPE_HUB: Final = "hub"
 ENTRY_TYPE_COMBINED_DEVICE: Final = "combined_device"
+GENERIC_TEMPLATE_SENTINEL: Final = "__generic_device__"
+CONF_GENERIC_REGISTERS: Final = "generic_registers"
+SERVICE_EXPORT_GENERIC_DEVICE: Final = "export_generic_device"
+GENERIC_EXPORT_API_PATH: Final = "/api/modbus_manager/generic_export/{filename}"
+GENERIC_EXPORT_LINK_VALID: Final = timedelta(hours=1)
 
 
 class EntityIdStrategy(StrEnum):
@@ -37,6 +43,7 @@ CONF_PRECISION: Final = "precision"
 CONF_MIN_VALUE: Final = "min_value"
 CONF_MAX_VALUE: Final = "max_value"
 CONF_MM_GROUP: Final = "mm_group"
+CONF_READ_GROUP: Final = "read_group"
 CONF_SCAN_INTERVAL: Final = "scan_interval"
 CONF_INPUT_TYPE: Final = "input_type"
 CONF_UNIT_OF_MEASUREMENT: Final = "unit_of_measurement"
