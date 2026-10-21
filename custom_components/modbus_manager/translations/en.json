@@ -29,14 +29,25 @@
                     "modbus_type": "Modbus connection type",
                     "timeout": "Timeout in seconds",
                     "delay": "Delay after connection (seconds)",
-                    "message_wait_milliseconds": "Wait between requests (milliseconds)"
+                    "message_wait_milliseconds": "Wait between requests (milliseconds)",
+                    "scan_group_fast": "Fast poll group (seconds)",
+                    "scan_group_medium": "Medium poll group (seconds)",
+                    "scan_group_slow": "Slow poll group (seconds)"
                 }
             },
             "template": {
-                "title": "Choose a template",
-                "description": "No automatic match, or you chose to pick the template. The address from the previous step is kept.",
+                "title": "Choose a device category",
+                "description": "No automatic match, or you chose to pick the template. The address from the previous step is kept. Next you pick manufacturer and model in this category.",
                 "data": {
-                    "template": "Device template"
+                    "template": "Device template",
+                    "template_category": "Device category"
+                }
+            },
+            "template_pick": {
+                "title": "Choose a template",
+                "description": "Category: {category}. Labels are manufacturer and model. Combined Device stays on the first setup menu.",
+                "data": {
+                    "template": "Manufacturer — model"
                 }
             },
             "generic_entity": {
@@ -56,6 +67,7 @@
                     "input_type": "Register type",
                     "data_type": "Data type",
                     "scan_interval": "Scan interval (seconds)",
+                    "scan_group": "Poll group (Fast / Medium / Slow)",
                     "entity_category": "Entity category",
                     "icon": "Icon",
                     "mm_group": "mm_group",
@@ -80,6 +92,7 @@
                     "device_class": "Device class",
                     "state_class": "State class",
                     "scan_interval": "Scan interval (seconds)",
+                    "scan_group": "Poll group (Fast / Medium / Slow)",
                     "encoding": "String encoding (utf-8 or hex)",
                     "byte_order": "Byte order",
                     "swap": "Word swap",
@@ -147,6 +160,9 @@
                     "delay": "Delay after Connection (seconds)",
                     "message_wait_milliseconds": "Wait between Requests (milliseconds)",
                     "post_write_settle_milliseconds": "Delay after Control Writes (milliseconds, 0 = off)",
+                    "scan_group_fast": "Fast poll group (seconds)",
+                    "scan_group_medium": "Medium poll group (seconds)",
+                    "scan_group_slow": "Slow poll group (seconds)",
                     "use_coordinator": "Use Coordinator Mode (experimental)",
                     "baudrate": "Baudrate",
                     "data_bits": "Data Bits",
@@ -220,6 +236,9 @@
                     "delay": "Delay after Connection (seconds)",
                     "message_wait_milliseconds": "Wait between Requests (milliseconds)",
                     "post_write_settle_milliseconds": "Delay after Control Writes (milliseconds, 0 = off)",
+                    "scan_group_fast": "Fast poll group (seconds)",
+                    "scan_group_medium": "Medium poll group (seconds)",
+                    "scan_group_slow": "Slow poll group (seconds)",
                     "phases": "Number of phases (1 or 3)",
                     "mppt_count": "Number of MPPT trackers",
                     "battery_config": "Battery Configuration",
@@ -310,7 +329,10 @@
                     "timeout": "Timeout (seconds)",
                     "delay": "Delay after Connection (seconds)",
                     "message_wait_milliseconds": "Wait between Requests (milliseconds)",
-                    "post_write_settle_milliseconds": "Delay after Control Writes (milliseconds, 0 = off)"
+                    "post_write_settle_milliseconds": "Delay after Control Writes (milliseconds, 0 = off)",
+                    "scan_group_fast": "Fast poll group (seconds)",
+                    "scan_group_medium": "Medium poll group (seconds)",
+                    "scan_group_slow": "Slow poll group (seconds)"
                 }
             }
         },
@@ -373,7 +395,10 @@
                     "timeout": "Timeout (seconds)",
                     "delay": "Delay after Connection (seconds)",
                     "message_wait_milliseconds": "Wait between Requests (milliseconds)",
-                    "post_write_settle_milliseconds": "Delay after Control Writes (milliseconds, 0 = off)"
+                    "post_write_settle_milliseconds": "Delay after Control Writes (milliseconds, 0 = off)",
+                    "scan_group_fast": "Fast poll group (seconds)",
+                    "scan_group_medium": "Medium poll group (seconds)",
+                    "scan_group_slow": "Slow poll group (seconds)"
                 }
             },
             "inverter": {
@@ -498,6 +523,7 @@
                     "input_type": "Register type",
                     "data_type": "Data type",
                     "scan_interval": "Scan interval (seconds)",
+                    "scan_group": "Poll group (Fast / Medium / Slow)",
                     "entity_category": "Entity category",
                     "icon": "Icon",
                     "mm_group": "mm_group",
@@ -593,9 +619,10 @@
         "step": {
             "user": {
                 "title": "Add device",
-                "description": "This device uses this hub's connection. Choose Generic Modbus Device or a YAML template, then prefix and slave ID.",
+                "description": "This device uses this hub's connection. Choose a category (or Generic Modbus Device), then manufacturer and model, then prefix and slave ID.",
                 "data": {
                     "template": "Device Template",
+                    "template_category": "Device category",
                     "prefix": "Device Prefix",
                     "slave_id": "Slave ID",
                     "selected_model": "Select Model",
@@ -606,6 +633,13 @@
                     "heat_pump_enabled": "Enable heat pump registers",
                     "pv2heat_enabled": "Enable PV2Heat registers",
                     "heat_meter_enabled": "Enable heat-meter power register"
+                }
+            },
+            "template_pick": {
+                "title": "Choose a template",
+                "description": "Category: {category}. Labels are manufacturer and model.",
+                "data": {
+                    "template": "Manufacturer — model"
                 }
             },
             "reconfigure": {
@@ -657,6 +691,7 @@
                     "input_type": "Register type",
                     "data_type": "Data type",
                     "scan_interval": "Scan interval (seconds)",
+                    "scan_group": "Poll group (Fast / Medium / Slow)",
                     "entity_category": "Entity category",
                     "icon": "Icon",
                     "mm_group": "mm_group",
@@ -728,9 +763,10 @@
             "step": {
                 "user": {
                     "title": "Add device",
-                    "description": "This device will use this hub's connection (host/port or serial). Choose Generic Modbus Device or a YAML template, then prefix and slave ID.",
+                    "description": "This device uses this hub's connection. Choose a category (or Generic Modbus Device), then manufacturer and model, then prefix and slave ID.",
                     "data": {
                         "template": "Device Template",
+                        "template_category": "Device category",
                         "prefix": "Device Prefix",
                         "slave_id": "Slave ID",
                         "selected_model": "Select Model",
@@ -741,6 +777,13 @@
                         "heat_pump_enabled": "Enable heat pump registers",
                         "pv2heat_enabled": "Enable PV2Heat registers",
                         "heat_meter_enabled": "Enable heat-meter power register"
+                    }
+                },
+                "template_pick": {
+                    "title": "Choose a template",
+                    "description": "Category: {category}. Labels are manufacturer and model.",
+                    "data": {
+                        "template": "Manufacturer — model"
                     }
                 },
                 "reconfigure": {
@@ -792,6 +835,7 @@
                         "input_type": "Register type",
                         "data_type": "Data type",
                         "scan_interval": "Scan interval (seconds)",
+                    "scan_group": "Poll group (Fast / Medium / Slow)",
                         "entity_category": "Entity category",
                         "icon": "Icon",
                         "mm_group": "mm_group",

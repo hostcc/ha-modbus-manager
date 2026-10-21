@@ -14,12 +14,12 @@ from homeassistant.components.modbus.const import (
     CALL_TYPE_REGISTER_INPUT,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import (
-    DEFAULT_MAX_REGISTER_READ,
     DOMAIN,
     POST_WRITE_SETTLE_SECONDS,
     POST_WRITE_SETTLE_WINET_SECONDS,
@@ -55,7 +55,15 @@ from .modbus_utils import (
     registers_to_bytes,
 )
 from .performance_monitor import PerformanceMonitor
-from .register_optimizer import RegisterOptimizer, RegisterRange
+from .poll_filter import registers_enabled_for_poll
+from .register_optimizer import RegisterOptimizer
+from .scan_groups import (
+    SCAN_GROUPS,
+    annotate_entity_buckets,
+    annotate_register_scan_timing,
+    scan_group_seconds_from_config,
+    seconds_until_next_due,
+)
 from .sunspec_utils import (
     calculate_sunspec_register_address,
     detect_sunspec_model_addresses,
@@ -137,17 +145,21 @@ class ModbusCoordinator(DataUpdateCoordinator):
         self.template_processor = None
         self.register_optimizer = RegisterOptimizer()
         self.performance_monitor = PerformanceMonitor()
-        self._template_batch_caps: Dict[str, int] = {}
 
         # Cache for processed entities (loaded once at startup, reused on every update)
         # Structured dict: {"sensors": [...], "controls": [...], "calculated": [...], "binary_sensors": [...]}
         self._cached_entities = None
-        self._cached_registers_by_interval = {}  # Register grouped by scan_interval
+        self._cached_registers_by_scan_group = {}
+        self._poll_cache_ready = False
+        self._unsub_registry = None
         self._cache_initialized = False
         self._cache_signature: str | None = None
         self._logged_dynamic_config_sources: set[str] = set()
+        self._scan_group_seconds = scan_group_seconds_from_config(
+            entry.data, getattr(entry, "options", None)
+        )
 
-        # Track when each interval group was last updated
+        # Track when each Fast/Medium/Slow group was last updated
         self._last_update_time = {}
 
         # Connection retry state (avoid log spam)
@@ -177,12 +189,24 @@ class ModbusCoordinator(DataUpdateCoordinator):
             entry.data.get("prefix", "unknown"),
             update_interval,
         )
+        registry_event = getattr(
+            er, "EVENT_ENTITY_REGISTRY_UPDATED", "entity_registry_updated"
+        )
+        self._unsub_registry = self.hass.bus.async_listen(
+            registry_event,
+            self._async_entity_registry_updated,
+        )
+
+    def invalidate_poll_cache(self) -> None:
+        """Rebuild Fast/Medium/Slow ranges on the next poll (no entry reload)."""
+        self._cached_registers_by_scan_group = {}
+        self._poll_cache_ready = False
 
     def invalidate_cache(self):
         """Invalidate the entity cache (e.g., when template is reloaded)."""
         _LOGGER.debug("Invalidating entity cache")
         self._cached_entities = None
-        self._cached_registers_by_interval = {}
+        self.invalidate_poll_cache()
         self._last_update_time = {}
         self._cache_initialized = False
         self._cache_signature = None
@@ -210,6 +234,9 @@ class ModbusCoordinator(DataUpdateCoordinator):
                 for d in (devices if isinstance(devices, list) else [])
                 if isinstance(d, dict)
             ],
+            "scan_group_fast": self.entry.data.get("scan_group_fast"),
+            "scan_group_medium": self.entry.data.get("scan_group_medium"),
+            "scan_group_slow": self.entry.data.get("scan_group_slow"),
         }
         return json.dumps(signature_payload, sort_keys=True, default=str)
 
@@ -230,6 +257,10 @@ class ModbusCoordinator(DataUpdateCoordinator):
         """Mark coordinator as unloading to stop further updates."""
         _LOGGER.debug("Marking coordinator as unloading")
         self._is_unloading = True
+        unsub = self._unsub_registry
+        self._unsub_registry = None
+        if unsub:
+            unsub()
         self.invalidate_cache()
 
     def _resolve_post_write_settle_ms(self) -> int | None:
@@ -288,9 +319,45 @@ class ModbusCoordinator(DataUpdateCoordinator):
             self.async_update_listeners()
         return success
 
+    def _disabled_unique_ids(self) -> set[str]:
+        """unique_id values disabled in the entity registry for this hub."""
+        registry = er.async_get(self.hass)
+        disabled: set[str] = set()
+        for entity_entry in registry.entities.values():
+            if entity_entry.config_entry_id != self.entry.entry_id:
+                continue
+            if not entity_entry.disabled:
+                continue
+            unique_id = str(entity_entry.unique_id or "").strip()
+            if unique_id:
+                disabled.add(unique_id)
+        return disabled
+
+    @callback
+    def _async_entity_registry_updated(self, event: Event) -> None:
+        """Rebuild poll ranges when the user enables or disables an entity."""
+        if self._is_unloading:
+            return
+        data = event.data or {}
+        action = data.get("action")
+        entity_id = data.get("entity_id")
+        if action == "update":
+            changes = data.get("changes") or {}
+            if "disabled_by" not in changes:
+                return
+        elif action != "create":
+            return
+        registry = er.async_get(self.hass)
+        entity_entry = registry.async_get(entity_id) if entity_id else None
+        if entity_entry is None or entity_entry.config_entry_id != self.entry.entry_id:
+            return
+        if action == "create" and not entity_entry.disabled:
+            return
+        self.invalidate_poll_cache()
+
     async def _ensure_register_interval_cache(self) -> None:
-        """Build scan_interval register cache if not yet initialized."""
-        if self._cached_registers_by_interval:
+        """Build Fast/Medium/Slow register cache if not yet initialized."""
+        if self._poll_cache_ready:
             return
 
         entities_dict = await self._collect_all_registers()
@@ -301,20 +368,34 @@ class ModbusCoordinator(DataUpdateCoordinator):
             b for b in binary_sensors if is_valid_modbus_address(b.get("address"))
         ]
         all_registers = sensors + controls + binary_sensors_with_address
-        if not all_registers:
-            return
+        disabled_ids = self._disabled_unique_ids()
+        poll_registers = registers_enabled_for_poll(all_registers, disabled_ids)
+        skipped = len(all_registers) - len(poll_registers)
+        if skipped:
+            _LOGGER.debug(
+                "Skipping %d HA-disabled entities in Modbus poll",
+                skipped,
+            )
 
-        self._cached_registers_by_interval = self._group_registers_by_interval(
-            all_registers
+        self._cached_registers_by_scan_group = self._group_registers_by_scan_group(
+            poll_registers
         )
-        self._update_coordinator_interval(5)
+        self._poll_cache_ready = True
+        populated_seconds = [
+            self._scan_group_seconds[group]
+            for group, regs in self._cached_registers_by_scan_group.items()
+            if regs
+        ]
+        self._update_coordinator_interval(
+            min(populated_seconds) if populated_seconds else 5
+        )
 
     def _find_registers_for_io(
         self, slave_id: int, address: int
     ) -> List[Dict[str, Any]]:
         """Return cached register configs matching a Modbus slave/address."""
         matches: List[Dict[str, Any]] = []
-        for registers in self._cached_registers_by_interval.values():
+        for registers in self._cached_registers_by_scan_group.values():
             for register in registers:
                 if register.get("address") != address:
                     continue
@@ -322,23 +403,6 @@ class ModbusCoordinator(DataUpdateCoordinator):
                     continue
                 matches.append(register)
         return matches
-
-    def _optimize_register_reads(
-        self, registers: List[Dict[str, Any]]
-    ) -> List[RegisterRange]:
-        """Group registers by template batch cap, then optimize each group."""
-        grouped: Dict[int, List[Dict[str, Any]]] = {}
-        for reg in registers:
-            cap = self._template_batch_caps.get(
-                reg.get("template"), DEFAULT_MAX_REGISTER_READ
-            )
-            grouped.setdefault(cap, []).append(reg)
-        ranges = []
-        for cap, group in grouped.items():
-            ranges.extend(
-                self.register_optimizer.optimize_registers(group, max_read_size=cap)
-            )
-        return ranges
 
     async def _async_read_written_register(self, slave_id: int, address: int) -> None:
         """Read register(s) immediately after a control write (bypass scan_interval)."""
@@ -355,7 +419,7 @@ class ModbusCoordinator(DataUpdateCoordinator):
             )
             return
 
-        optimized_ranges = self._optimize_register_reads(registers)
+        optimized_ranges = self.register_optimizer.optimize_registers(registers)
         for range_obj in optimized_ranges:
             try:
                 data = await self._read_register_range(range_obj)
@@ -403,11 +467,23 @@ class ModbusCoordinator(DataUpdateCoordinator):
                 operation_type="coordinator_update",
             )
 
-            # 1. Group registers by scan_interval if not cached
+            # 1. Group registers by scan_group if not cached
+            self._refresh_scan_group_seconds()
             await self._ensure_register_interval_cache()
 
-            # 2. Determine which registers need to be read based on their scan_interval
-            registers_to_read = self._get_registers_due_for_update()
+            # 2–3. Due Fast/Medium/Slow groups; optimize each group separately
+            due_groups = self._due_scan_groups()
+            cycle_started = asyncio.get_running_loop().time()
+            registers_to_read: List[Dict[str, Any]] = []
+            optimized_ranges: List[Any] = []
+            for group in SCAN_GROUPS:
+                if group not in due_groups:
+                    continue
+                group_registers = self._cached_registers_by_scan_group.get(group) or []
+                registers_to_read.extend(group_registers)
+                optimized_ranges.extend(
+                    self.register_optimizer.optimize_registers(group_registers)
+                )
 
             # Update operation with register count
             total_registers = len(registers_to_read) if registers_to_read else 0
@@ -422,15 +498,13 @@ class ModbusCoordinator(DataUpdateCoordinator):
 
             if not registers_to_read:
                 _LOGGER.debug("No registers due for update at this time")
+                self._reschedule_for_next_due()
                 self.performance_monitor.end_operation(
                     device_id=self.entry.data.get("prefix", "unknown"),
                     operation_id=operation_id,
                     success=True,
                 )
                 return self.register_data
-
-            # 3. Optimize reading (group consecutive registers)
-            optimized_ranges = self._optimize_register_reads(registers_to_read)
 
             # Calculate total bytes that will be transferred (2 bytes per register)
             total_bytes = sum(
@@ -468,11 +542,11 @@ class ModbusCoordinator(DataUpdateCoordinator):
                             entity_list,
                         )
 
-            # 5. Update last_update_time for each interval
-            current_time = asyncio.get_running_loop().time()
-            for register in registers_to_read:
-                interval = register.get("scan_interval", 30)
-                self._last_update_time[interval] = current_time
+            # 5. Stamp due groups at cycle start so I/O time is not added
+            # on top of the configured Fast/Medium/Slow interval.
+            for group in due_groups:
+                self._last_update_time[group] = cycle_started
+            self._reschedule_for_next_due()
 
             # 5.5. Update device firmware from register if available
             await self._update_device_firmware_from_register()
@@ -581,6 +655,7 @@ class ModbusCoordinator(DataUpdateCoordinator):
             if not self._cache_initialized:
                 _LOGGER.debug("Initializing entity cache for %d devices", len(devices))
             entities = await self._collect_registers_from_devices(devices)
+            annotate_entity_buckets(entities, self._scan_group_seconds)
 
             # Cache the results
             self._cached_entities = entities
@@ -626,7 +701,6 @@ class ModbusCoordinator(DataUpdateCoordinator):
         }
         """
         try:
-            self._template_batch_caps = {}
             # Initialize structured entity collections
             all_sensors = []
             all_controls = []
@@ -707,9 +781,6 @@ class ModbusCoordinator(DataUpdateCoordinator):
                     if not template:
                         _LOGGER.error("Template %s not found for device", template_name)
                         continue
-                self._template_batch_caps[template_name] = template.get(
-                    "max_register_read", DEFAULT_MAX_REGISTER_READ
-                )
 
                 # Build dynamic_config dict dynamically from template's dynamic_config section
                 # This automatically includes ALL fields defined in the template (e.g., dual_channel_meter)
@@ -1044,14 +1115,6 @@ class ModbusCoordinator(DataUpdateCoordinator):
                 processed_binary_sensors = self._process_entities_with_prefix(
                     binary_sensors, prefix, template_name, entity_id_strategy
                 )
-                # Cap lookup is by template name. The loader tags sensors only;
-                # controls and binary sensors need the same key on these copies.
-                for entity in (
-                    *processed_registers,
-                    *processed_controls,
-                    *processed_binary_sensors,
-                ):
-                    entity["template"] = template_name
 
                 # Create device info dict for this device
                 device_entry_id = device.get(
@@ -2098,7 +2161,7 @@ class ModbusCoordinator(DataUpdateCoordinator):
                 if (
                     self._is_unloading
                     or not self._cache_initialized
-                    or not self._cached_registers_by_interval
+                    or not self._cached_registers_by_scan_group
                 ):
                     # Coordinator is being reloaded/unloaded, suppress warning
                     _LOGGER.debug(
@@ -2354,62 +2417,82 @@ class ModbusCoordinator(DataUpdateCoordinator):
         """Get all register data."""
         return self.register_data.copy()
 
-    def _group_registers_by_interval(
+    def _group_registers_by_scan_group(
         self, registers: List[Dict[str, Any]]
-    ) -> Dict[int, List[Dict[str, Any]]]:
-        """Group registers by their scan_interval."""
-        grouped = {}
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Group registers by Fast / Medium / Slow without mixing cadences."""
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
         for register in registers:
-            # Get scan_interval from register, default to 30 seconds
-            interval = register.get("scan_interval", 30)
-            if not isinstance(interval, (int, float)):
-                interval = 30
-
-            interval = int(interval)  # Ensure it's an integer
-
-            if interval not in grouped:
-                grouped[interval] = []
-            grouped[interval].append(register)
-
+            annotated = annotate_register_scan_timing(
+                dict(register), self._scan_group_seconds
+            )
+            grouped.setdefault(annotated["scan_group"], []).append(annotated)
         return grouped
 
-    def _get_registers_due_for_update(self) -> List[Dict[str, Any]]:
-        """Get registers that are due for update based on their scan_interval."""
+    def _due_scan_groups(self) -> set[str]:
+        """Return scan groups whose hub interval has elapsed (or never read)."""
+        due: set[str] = set()
         try:
-            if not self._cached_registers_by_interval:
-                return []
-
+            if not self._cached_registers_by_scan_group:
+                return due
             current_time = asyncio.get_running_loop().time()
-            registers_to_read = []
-
-            # Track which intervals are being updated
-            intervals_to_update = []
-
-            for interval, registers in self._cached_registers_by_interval.items():
-                # A group that was never read is due now: the loop clock is
-                # monotonic, so 0 is not "never" (it may still be < interval)
-                last_update = self._last_update_time.get(interval)
-
-                # Check if this interval group is due for update
+            for group, registers in self._cached_registers_by_scan_group.items():
+                if not registers:
+                    continue
+                interval = int(self._scan_group_seconds.get(group, 30))
+                last_update = self._last_update_time.get(group)
                 if last_update is None or current_time - last_update >= interval:
-                    registers_to_read.extend(registers)
-                    intervals_to_update.append((interval, len(registers)))
+                    due.add(group)
+            return due
+        except Exception as e:
+            _LOGGER.error("Error determining scan groups due for update: %s", str(e))
+            return set(self._cached_registers_by_scan_group.keys())
 
+    def _get_registers_due_for_update(self) -> List[Dict[str, Any]]:
+        """Get registers that are due for update based on their scan group."""
+        try:
+            due_groups = self._due_scan_groups()
+            registers_to_read: List[Dict[str, Any]] = []
+            for group in SCAN_GROUPS:
+                if group not in due_groups:
+                    continue
+                registers_to_read.extend(
+                    self._cached_registers_by_scan_group.get(group) or []
+                )
             return registers_to_read
-
         except Exception as e:
             _LOGGER.error("Error determining registers due for update: %s", str(e))
-            # Fallback: return all registers
             return [
                 reg
-                for regs in self._cached_registers_by_interval.values()
+                for regs in self._cached_registers_by_scan_group.values()
                 for reg in regs
             ]
 
-    def _update_coordinator_interval(self, interval: int) -> None:
+    def _refresh_scan_group_seconds(self) -> None:
+        """Reload Fast/Medium/Slow seconds from the config entry."""
+        self._scan_group_seconds = scan_group_seconds_from_config(
+            self.entry.data, getattr(self.entry, "options", None)
+        )
+
+    def _reschedule_for_next_due(self) -> None:
+        """Wait only until the next group is due, not a full interval after I/O."""
+        populated = [
+            group
+            for group, registers in self._cached_registers_by_scan_group.items()
+            if registers
+        ]
+        wait = seconds_until_next_due(
+            last_update_time=self._last_update_time,
+            scan_group_seconds=self._scan_group_seconds,
+            populated_groups=populated,
+            now=asyncio.get_running_loop().time(),
+        )
+        self._update_coordinator_interval(wait)
+
+    def _update_coordinator_interval(self, interval: float) -> None:
         """Update the coordinator's update interval to match minimum scan_interval."""
         try:
-            new_interval = timedelta(seconds=interval)
+            new_interval = timedelta(seconds=float(interval))
             current_interval = self.update_interval
 
             # Only update if the new interval is different
@@ -2516,6 +2599,7 @@ class ModbusCoordinator(DataUpdateCoordinator):
     async def async_shutdown(self) -> None:
         """Shutdown the coordinator."""
         _LOGGER.debug("Shutting down ModbusCoordinator")
+        self.mark_as_unloading()
         # Cancel any pending updates
         if hasattr(self, "_update_task") and self._update_task:
             self._update_task.cancel()

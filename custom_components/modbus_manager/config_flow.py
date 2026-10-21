@@ -19,6 +19,9 @@ from .combined_specs import resolve_combination_type
 from .const import (
     CONF_ENTRY_TYPE,
     CONF_GENERIC_REGISTERS,
+    CONF_SCAN_GROUP_FAST,
+    CONF_SCAN_GROUP_MEDIUM,
+    CONF_SCAN_GROUP_SLOW,
     DEFAULT_DELAY,
     DEFAULT_MESSAGE_WAIT_MS,
     DEFAULT_PORT,
@@ -30,10 +33,15 @@ from .const import (
     ENTRY_TYPE_HUB,
     GENERIC_TEMPLATE_SENTINEL,
     MAX_POST_WRITE_SETTLE_MS,
+    MAX_SCAN_GROUP_SECONDS,
     MIN_DELAY,
     MIN_MESSAGE_WAIT_MS,
     MIN_POST_WRITE_SETTLE_MS,
+    MIN_SCAN_GROUP_SECONDS,
     MIN_TIMEOUT,
+    SCAN_GROUP_FAST,
+    SCAN_GROUP_MEDIUM,
+    SCAN_GROUP_SLOW,
     EntityIdStrategy,
 )
 from .device_utils import (
@@ -62,7 +70,6 @@ from .generic_device import (
     async_export_generic_device,
     async_notify_generic_export,
     generic_confirm_actions,
-    generic_device_template_label,
     generic_entity_core_schema,
     generic_entity_extras_schema,
     generic_entity_type_label,
@@ -76,6 +83,14 @@ from .generic_device import (
 )
 from .hub_identify import IdentifyHit, async_identify_hub
 from .logger import ModbusManagerLogger
+from .scan_groups import persist_scan_groups, scan_group_seconds_from_config
+from .template_catalog import (
+    DEVICE_CATEGORY_GENERIC,
+    category_labels,
+    present_categories,
+    template_picker_label,
+    templates_in_category,
+)
 from .template_loader import (
     _evaluate_condition,
     get_template_by_name,
@@ -152,6 +167,27 @@ def _apply_post_write_settle_to_entry_data(
     hub = entry_data.get("hub")
     if isinstance(hub, dict):
         hub["post_write_settle_milliseconds"] = milliseconds
+
+
+def _scan_group_schema_fields(source: dict[str, Any] | None = None) -> dict[Any, Any]:
+    """Hub Fast / Medium / Slow poll intervals (seconds)."""
+    seconds = scan_group_seconds_from_config(source)
+    return {
+        vol.Optional(CONF_SCAN_GROUP_FAST, default=seconds[SCAN_GROUP_FAST]): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=MIN_SCAN_GROUP_SECONDS, max=MAX_SCAN_GROUP_SECONDS),
+        ),
+        vol.Optional(
+            CONF_SCAN_GROUP_MEDIUM, default=seconds[SCAN_GROUP_MEDIUM]
+        ): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=MIN_SCAN_GROUP_SECONDS, max=MAX_SCAN_GROUP_SECONDS),
+        ),
+        vol.Optional(CONF_SCAN_GROUP_SLOW, default=seconds[SCAN_GROUP_SLOW]): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=MIN_SCAN_GROUP_SECONDS, max=MAX_SCAN_GROUP_SECONDS),
+        ),
+    }
 
 
 _TCP_RTU_MODBUS_TYPES = frozenset({"tcp", "rtuovertcp"})
@@ -1075,15 +1111,19 @@ class ModbusManagerConfigFlow(
         return None
 
     def _template_choices(self, *, include_combined: bool = False) -> dict[str, str]:
-        """Map template YAML name → display label."""
+        """Map template YAML name → Manufacturer — Model label."""
         names = sorted(self._templates.keys())
         choices = {
-            name: ((self._templates[name].get("display_name") or "").strip() or name)
+            name: template_picker_label(self._templates.get(name) or {}, name)
             for name in names
         }
         if include_combined:
             choices[COMBINED_TEMPLATE_SENTINEL] = "Combined Device (cross-hub)"
         return choices
+
+    def _template_category_choices(self) -> dict[str, str]:
+        """Categories that currently have at least one YAML template."""
+        return category_labels(self.hass, present_categories(self._templates))
 
     async def _continue_after_template_choice(self, template_name: str) -> FlowResult:
         """Route a chosen template into connection or simple device config."""
@@ -1210,6 +1250,7 @@ class ModbusManagerConfigFlow(
             "template_version": "0.1.0",
             CONF_GENERIC_REGISTERS: rows,
         }
+        persist_scan_groups(config_data, user_input)
         config_data["devices"] = [
             self._normalize_device_record(
                 _apply_entry_data_fallbacks_to_device(device, config_data)
@@ -1238,22 +1279,62 @@ class ModbusManagerConfigFlow(
         return self.async_create_entry(title=title, data=config_data)
 
     async def async_step_template(self, user_input: dict | None = None) -> FlowResult:
-        """Manual template picker (probe miss, or user skipped detect)."""
+        """Pick a device category, then a template (probe miss or manual)."""
         abort = await self._async_load_templates()
         if abort is not None:
             return abort
-        if user_input is not None and "template" in user_input:
-            return await self._continue_after_template_choice(user_input["template"])
-        template_choices = self._template_choices(include_combined=True)
+        if user_input is not None and user_input.get("template_category"):
+            self._template_category = str(user_input["template_category"])
+            return await self.async_step_template_pick()
+
+        categories = self._template_category_choices()
+        if not categories:
+            return self.async_abort(reason="no_templates")
+        if len(categories) == 1:
+            self._template_category = next(iter(categories))
+            return await self.async_step_template_pick()
+
         return self.async_show_form(
             step_id="template",
             data_schema=vol.Schema(
-                {vol.Required("template"): vol.In(template_choices)}
+                {vol.Required("template_category"): vol.In(categories)}
             ),
             description_placeholders={
                 "config_flow_note": "",
                 "template_count": str(len(self._templates)),
-                "template_list": ", ".join(template_choices.values()),
+                "template_list": ", ".join(categories.values()),
+            },
+        )
+
+    async def async_step_template_pick(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Pick a template inside the chosen category."""
+        abort = await self._async_load_templates()
+        if abort is not None:
+            return abort
+        category = getattr(self, "_template_category", None)
+        if not category:
+            return await self.async_step_template()
+        if user_input is not None and user_input.get("template"):
+            return await self._continue_after_template_choice(user_input["template"])
+
+        template_choices = templates_in_category(self._templates, category)
+        if not template_choices:
+            return await self.async_step_template()
+        if len(template_choices) == 1:
+            return await self._continue_after_template_choice(
+                next(iter(template_choices))
+            )
+        return self.async_show_form(
+            step_id="template_pick",
+            data_schema=vol.Schema(
+                {vol.Required("template"): vol.In(template_choices)}
+            ),
+            description_placeholders={
+                "category": category_labels(self.hass, [category]).get(
+                    category, category
+                ),
             },
         )
 
@@ -1287,6 +1368,7 @@ class ModbusManagerConfigFlow(
                             ),
                         }
                     )
+                    persist_scan_groups(stored, user_input)
                     self._connection_params = stored
                     try:
                         hit = await async_identify_hub(
@@ -1327,6 +1409,7 @@ class ModbusManagerConfigFlow(
                             )
                         ),
                     ): int,
+                    **_scan_group_schema_fields(stored),
                 }
             ),
             errors=errors,
@@ -1604,6 +1687,7 @@ class ModbusManagerConfigFlow(
                     )
                 ),
             )
+            persist_scan_groups(new_data, user_input)
             self.hass.config_entries.async_update_entry(config_entry, data=new_data)
             await self.hass.config_entries.async_reload(config_entry.entry_id)
             return self.async_create_entry(title="", data={})
@@ -1634,6 +1718,7 @@ class ModbusManagerConfigFlow(
                 ): int,
             }
         )
+        schema_fields.update(_scan_group_schema_fields(config_entry.data))
 
         return self.async_show_form(
             step_id="reconfigure",
@@ -1658,6 +1743,7 @@ class ModbusManagerConfigFlow(
 
             stored = dict(getattr(self, "_connection_params", {}) or {})
             stored.update(user_input)
+            persist_scan_groups(stored, user_input)
             self._connection_params = stored
 
             # Proceed to model selection or dynamic config
@@ -1720,6 +1806,7 @@ class ModbusManagerConfigFlow(
                         "post_write_settle_milliseconds",
                         default=default_settle,
                     ): int,
+                    **_scan_group_schema_fields(stored),
                     # vol.Optional(
                     #     CONF_TEST_ALLOW_SAME_ENDPOINT_NEW_HUB, default=False
                     # ): bool,
@@ -1967,6 +2054,7 @@ class ModbusManagerConfigFlow(
                     "post_write_settle_milliseconds",
                     default=DEFAULT_POST_WRITE_SETTLE_MS,
                 ): int,
+                **_scan_group_schema_fields(getattr(self, "_connection_params", {})),
                 # vol.Optional(
                 #     CONF_TEST_ALLOW_SAME_ENDPOINT_NEW_HUB, default=False
                 # ): bool,
@@ -3357,6 +3445,7 @@ class ModbusManagerConfigFlow(
                 "binary_sensors": template_binary_sensors,
                 "controls": template_controls,
             }
+            persist_scan_groups(config_data, user_input)
 
             # Add dynamic configuration parameters if available
             # Configuration values are already extracted from processed_data above
@@ -3820,36 +3909,55 @@ class ModbusManagerDeviceSubentryFlow(
             data_schema=vol.Schema(schema_fields),
         )
 
-    async def _show_add_template_select_form(self) -> FlowResult:
-        """Render first add-device step with template selection only."""
-        template_names = sorted(await get_template_names())
-        template_choices = {
-            GENERIC_TEMPLATE_SENTINEL: generic_device_template_label(self.hass),
-        }
-        for tn in template_names:
-            td = await get_template_by_name(tn)
-            label = (
-                (td.get("display_name") or "").strip() or tn
-                if isinstance(td, dict)
-                else tn
-            )
-            template_choices[tn] = label
+    async def _add_device_templates(self) -> dict[str, dict]:
+        """Load YAML templates for the add-device category picker."""
+        loaded: dict[str, dict] = {}
+        for name in sorted(await get_template_names()):
+            data = await get_template_by_name(name)
+            if isinstance(data, dict):
+                loaded[name] = data
+        return loaded
 
-        default_template = GENERIC_TEMPLATE_SENTINEL
+    async def _show_add_template_select_form(self) -> FlowResult:
+        """First add-device step: device category (then a short model list)."""
+        templates = await self._add_device_templates()
+        categories = {
+            DEVICE_CATEGORY_GENERIC: category_labels(
+                self.hass, [DEVICE_CATEGORY_GENERIC]
+            )[DEVICE_CATEGORY_GENERIC],
+            **category_labels(self.hass, present_categories(templates)),
+        }
         self._add_form_template_name = None
-        self._add_template_candidate = default_template
+        self._add_template_candidate = None
         self._add_form_prefix_default = None
         self._add_form_slave_default = None
-
+        self._add_template_category = None
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required("template", default=default_template): vol.In(
-                        template_choices
-                    ),
+                    vol.Required(
+                        "template_category", default=DEVICE_CATEGORY_GENERIC
+                    ): vol.In(categories)
                 }
             ),
+        )
+
+    def _show_add_template_pick_form(
+        self, template_choices: dict[str, str]
+    ) -> FlowResult:
+        """Second add-device step: templates in the chosen category."""
+        category = getattr(self, "_add_template_category", "") or ""
+        return self.async_show_form(
+            step_id="template_pick",
+            data_schema=vol.Schema(
+                {vol.Required("template"): vol.In(template_choices)}
+            ),
+            description_placeholders={
+                "category": category_labels(self.hass, [category]).get(
+                    category, category
+                ),
+            },
         )
 
     def _generic_confirm_actions(self) -> dict[str, str]:
@@ -4076,7 +4184,45 @@ class ModbusManagerDeviceSubentryFlow(
         if entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_COMBINED_DEVICE:
             return self.async_abort(reason="combined_device")
         if user_input is not None:
-            # Stage 1: template selected, now show defaults for prefix/slave_id.
+            if (
+                "prefix" not in user_input
+                and "slave_id" not in user_input
+                and "template" not in user_input
+                and user_input.get("template_category")
+            ):
+                category = str(user_input["template_category"])
+                self._add_template_category = category
+                if category == DEVICE_CATEGORY_GENERIC:
+                    template_name = GENERIC_TEMPLATE_SENTINEL
+                    self._add_template_candidate = template_name
+                    (
+                        default_prefix,
+                        default_slave_id,
+                    ) = await self._get_template_defaults(template_name)
+                    return await self._show_add_device_form(
+                        selected_template=template_name,
+                        prefix_default=default_prefix,
+                        slave_id_default=default_slave_id,
+                    )
+                templates = await self._add_device_templates()
+                template_choices = templates_in_category(templates, category)
+                if not template_choices:
+                    return await self._show_add_template_select_form()
+                if len(template_choices) == 1:
+                    template_name = next(iter(template_choices))
+                    self._add_template_candidate = template_name
+                    (
+                        default_prefix,
+                        default_slave_id,
+                    ) = await self._get_template_defaults(template_name)
+                    return await self._show_add_device_form(
+                        selected_template=template_name,
+                        prefix_default=default_prefix,
+                        slave_id_default=default_slave_id,
+                    )
+                return self._show_add_template_pick_form(template_choices)
+
+            # Template selected, now show defaults for prefix/slave_id.
             if "prefix" not in user_input and "slave_id" not in user_input:
                 template_name = user_input["template"]
                 self._add_template_candidate = template_name
@@ -4201,6 +4347,21 @@ class ModbusManagerDeviceSubentryFlow(
             return self.async_abort(reason="device_attached")
 
         return await self._show_add_template_select_form()
+
+    async def async_step_template_pick(
+        self, user_input: dict | None = None
+    ) -> FlowResult:
+        """Add-device model list after a category was chosen."""
+        if user_input is not None:
+            return await self.async_step_user(user_input)
+        category = getattr(self, "_add_template_category", None)
+        if not category or category == DEVICE_CATEGORY_GENERIC:
+            return await self._show_add_template_select_form()
+        templates = await self._add_device_templates()
+        template_choices = templates_in_category(templates, category)
+        if not template_choices:
+            return await self._show_add_template_select_form()
+        return self._show_add_template_pick_form(template_choices)
 
     async def async_step_reconfigure(
         self, user_input: dict | None = None
@@ -5208,6 +5369,7 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                         )
                     ),
                 )
+                persist_scan_groups(new_data, user_input)
                 new_data["host"] = new_host
                 new_data["port"] = new_port
                 if current_modbus in _TCP_RTU_MODBUS_TYPES:
@@ -5229,6 +5391,7 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                     if new_data.get("modbus_type"):
                         hub_config["type"] = new_data["modbus_type"]
                     new_data["hub"] = hub_config
+                persist_scan_groups(new_data, user_input)
 
                 endpoint_changed = (new_host, new_port) != (
                     current_host,
@@ -5251,7 +5414,15 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                     new_host,
                     new_port,
                 )
-                update_kwargs: dict[str, Any] = {"data": new_data}
+                scan_options = {
+                    CONF_SCAN_GROUP_FAST: new_data[CONF_SCAN_GROUP_FAST],
+                    CONF_SCAN_GROUP_MEDIUM: new_data[CONF_SCAN_GROUP_MEDIUM],
+                    CONF_SCAN_GROUP_SLOW: new_data[CONF_SCAN_GROUP_SLOW],
+                }
+                update_kwargs: dict[str, Any] = {
+                    "data": new_data,
+                    "options": {**dict(self.config_entry.options), **scan_options},
+                }
                 if entry_title is not None:
                     update_kwargs["title"] = entry_title
                 self.hass.config_entries.async_update_entry(
@@ -5264,7 +5435,7 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                     await reload_dependent_combined_entries(
                         self.hass, self.config_entry.entry_id
                     )
-                return self.async_create_entry(title="", data={})
+                return self.async_create_entry(title="", data=scan_options)
 
         schema_fields: dict[Any, Any] = {}
         if current_modbus in _TCP_RTU_MODBUS_TYPES:
@@ -5295,6 +5466,7 @@ class ModbusManagerOptionsFlow(config_entries.OptionsFlow):
                 ): int,
             }
         )
+        schema_fields.update(_scan_group_schema_fields(self.config_entry.data))
 
         return self.async_show_form(
             step_id="connection",

@@ -67,6 +67,7 @@ def invalidate_template_cache() -> None:
 from .const import (
     CONF_MM_GROUP,
     CONF_READ_GROUP,
+    CONF_SCAN_GROUP,
     DEFAULT_MAX_REGISTER_READ,
     DEFAULT_MAX_VALUE,
     DEFAULT_MIN_VALUE,
@@ -78,45 +79,9 @@ from .const import (
 )
 from .device_utils import get_entity_mm_group
 from .logger import ModbusManagerLogger
-from .register_optimizer import MAX_MODBUS_READ_REGISTERS, clamp_max_register_read
+from .scan_groups import SCAN_GROUPS, annotate_register_scan_timing
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _resolve_max_register_read(
-    data: Dict[str, Any], template_name: str, inherited: Any = None
-) -> int:
-    """Resolve the optimizer batch cap from template YAML.
-
-    An omitted key inherits the base template value, or the integration default.
-    Non-integers fall back to the default. Integers outside 1-125 are clamped.
-    """
-    if "max_register_read" not in data or data.get("max_register_read") is None:
-        if isinstance(inherited, bool) or not isinstance(inherited, int):
-            return DEFAULT_MAX_REGISTER_READ
-        return clamp_max_register_read(inherited)
-
-    raw = data.get("max_register_read")
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        _LOGGER.warning(
-            "Template %s has invalid max_register_read %r; using %d",
-            template_name,
-            raw,
-            DEFAULT_MAX_REGISTER_READ,
-        )
-        return DEFAULT_MAX_REGISTER_READ
-
-    clamped = clamp_max_register_read(raw)
-    if clamped != raw:
-        _LOGGER.warning(
-            "Template %s max_register_read %d is outside 1-%d; using %d",
-            template_name,
-            raw,
-            MAX_MODBUS_READ_REGISTERS,
-            clamped,
-        )
-    return clamped
-
 
 # Template directories relative to project root
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "device_templates")
@@ -196,6 +161,7 @@ OPTIONAL_FIELDS = {
     "data_type": "uint16",
     "count": 1,
     "scan_interval": DEFAULT_UPDATE_INTERVAL,
+    CONF_SCAN_GROUP: None,
     "precision": DEFAULT_PRECISION,
     "unit_of_measurement": "",
     "device_class": None,
@@ -541,12 +507,10 @@ async def load_single_template(
         # _LOGGER.debug("Processing template %s", template_name)
 
         # Check if template extends a base template
-        inherited_max_register_read = None
         extends_name = data.get("extends")
         if extends_name and base_templates and extends_name in base_templates:
             # Extend from base template
             base_template = base_templates[extends_name]
-            inherited_max_register_read = base_template.get("max_register_read")
             # _LOGGER.debug("Template %s erweitert BASE-Template %s", template_name, extends_name)
 
             # Check if this is a simple template (requires only prefix and name)
@@ -728,9 +692,6 @@ async def load_single_template(
             "model": data.get("model", ""),
             "default_prefix": data.get("default_prefix", "device"),
             "default_slave_id": data.get("default_slave_id", 1),
-            "max_register_read": _resolve_max_register_read(
-                data, template_name, inherited_max_register_read
-            ),
             "firmware_version": data.get("firmware_version", "1.0.0"),
             "available_firmware_versions": data.get("available_firmware_versions", []),
         }
@@ -1452,6 +1413,8 @@ def validate_and_process_register(
         # Set default values for optional fields (skip count - handled above)
         for field, default_value in OPTIONAL_FIELDS.items():
             if field not in processed_reg and field != "count":
+                if field == "scan_interval" and field not in reg:
+                    continue
                 processed_reg[field] = reg.get(field, default_value)
 
         # Zusätzliche Felder aus dem Template übernehmen
@@ -1461,6 +1424,7 @@ def validate_and_process_register(
 
         # Entity-Typ bestimmen
         processed_reg["entity_type"] = determine_entity_type(processed_reg)
+        annotate_register_scan_timing(processed_reg)
 
         # Validate register
         if not validate_register_data(processed_reg, template_name):
@@ -1549,7 +1513,13 @@ def validate_register_data(reg: Dict[str, Any], template_name: str) -> bool:
             _LOGGER.error("Invalid scale in Template %s: %s", template_name, scale)
             return False
 
-        # Validate scan interval
+        # Validate scan interval / scan_group
+        scan_group = reg.get(CONF_SCAN_GROUP)
+        if scan_group is not None and scan_group not in SCAN_GROUPS:
+            _LOGGER.error(
+                "Invalid scan_group in Template %s: %s", template_name, scan_group
+            )
+            return False
         scan_interval = reg.get("scan_interval")
         if not isinstance(scan_interval, int) or scan_interval < 0:
             _LOGGER.error(

@@ -29,14 +29,25 @@
                     "modbus_type": "Modbus-Verbindungstyp",
                     "timeout": "Timeout in Sekunden",
                     "delay": "Verzögerung nach Verbindung (Sekunden)",
-                    "message_wait_milliseconds": "Wartezeit zwischen Requests (Millisekunden)"
+                    "message_wait_milliseconds": "Wartezeit zwischen Requests (Millisekunden)",
+                    "scan_group_fast": "Schnelle Poll-Gruppe (Sekunden)",
+                    "scan_group_medium": "Mittlere Poll-Gruppe (Sekunden)",
+                    "scan_group_slow": "Langsame Poll-Gruppe (Sekunden)"
                 }
             },
             "template": {
-                "title": "Template wählen",
-                "description": "Keine automatische Erkennung, oder Sie wählen selbst. Die Adresse aus dem vorherigen Schritt bleibt erhalten.",
+                "title": "Geräte-Kategorie wählen",
+                "description": "Keine automatische Erkennung, oder Sie wählen selbst. Die Adresse aus dem vorherigen Schritt bleibt erhalten. Als Nächstes wählen Sie Hersteller und Modell in dieser Kategorie.",
                 "data": {
-                    "template": "Geräte-Template"
+                    "template": "Geräte-Template",
+                    "template_category": "Geräte-Kategorie"
+                }
+            },
+            "template_pick": {
+                "title": "Template wählen",
+                "description": "Kategorie: {category}. Die Namen sind Hersteller und Modell. Combined Device bleibt im ersten Setup-Menü.",
+                "data": {
+                    "template": "Hersteller — Modell"
                 }
             },
             "generic_entity": {
@@ -56,6 +67,7 @@
                     "input_type": "Registertyp",
                     "data_type": "Datentyp",
                     "scan_interval": "Scan-Intervall (Sekunden)",
+                    "scan_group": "Poll-Gruppe (Schnell / Mittel / Langsam)",
                     "entity_category": "Entity-Kategorie",
                     "icon": "Icon",
                     "mm_group": "mm_group",
@@ -80,6 +92,7 @@
                     "device_class": "Geräteklasse",
                     "state_class": "Zustandsklasse",
                     "scan_interval": "Scan-Intervall (Sekunden)",
+                    "scan_group": "Poll-Gruppe (Schnell / Mittel / Langsam)",
                     "encoding": "String-Encoding (utf-8 oder hex)",
                     "byte_order": "Byte-Reihenfolge",
                     "swap": "Word-Swap",
@@ -147,6 +160,9 @@
                     "delay": "Verzögerung nach Verbindung (Sekunden)",
                     "message_wait_milliseconds": "Wartezeit zwischen Requests (Millisekunden)",
                     "post_write_settle_milliseconds": "Pause nach Schreibbefehlen (Millisekunden, 0 = aus)",
+                    "scan_group_fast": "Schnelle Poll-Gruppe (Sekunden)",
+                    "scan_group_medium": "Mittlere Poll-Gruppe (Sekunden)",
+                    "scan_group_slow": "Langsame Poll-Gruppe (Sekunden)",
                     "use_coordinator": "Coordinator-Modus verwenden (experimentell)",
                     "baudrate": "Baudrate",
                     "data_bits": "Datenbits",
@@ -234,6 +250,9 @@
                     "delay": "Verzögerung nach Verbindung (Sekunden)",
                     "message_wait_milliseconds": "Wartezeit zwischen Requests (Millisekunden)",
                     "post_write_settle_milliseconds": "Pause nach Schreibbefehlen (Millisekunden, 0 = aus)",
+                    "scan_group_fast": "Schnelle Poll-Gruppe (Sekunden)",
+                    "scan_group_medium": "Mittlere Poll-Gruppe (Sekunden)",
+                    "scan_group_slow": "Langsame Poll-Gruppe (Sekunden)",
                     "baudrate": "Baudrate (nur RTU)",
                     "data_bits": "Datenbits (nur RTU)",
                     "stop_bits": "Stoppbits (nur RTU)",
@@ -330,7 +349,10 @@
                     "timeout": "Timeout in Sekunden",
                     "delay": "Verzögerung nach Verbindung (Sekunden)",
                     "message_wait_milliseconds": "Wartezeit zwischen Requests (Millisekunden)",
-                    "post_write_settle_milliseconds": "Pause nach Schreibbefehlen (Millisekunden, 0 = aus)"
+                    "post_write_settle_milliseconds": "Pause nach Schreibbefehlen (Millisekunden, 0 = aus)",
+                    "scan_group_fast": "Schnelle Poll-Gruppe (Sekunden)",
+                    "scan_group_medium": "Mittlere Poll-Gruppe (Sekunden)",
+                    "scan_group_slow": "Langsame Poll-Gruppe (Sekunden)"
                 }
             }
         },
@@ -393,7 +415,10 @@
                     "timeout": "Timeout in Sekunden",
                     "delay": "Verzögerung nach Verbindung (Sekunden)",
                     "message_wait_milliseconds": "Wartezeit zwischen Requests (Millisekunden)",
-                    "post_write_settle_milliseconds": "Pause nach Schreibbefehlen (Millisekunden, 0 = aus)"
+                    "post_write_settle_milliseconds": "Pause nach Schreibbefehlen (Millisekunden, 0 = aus)",
+                    "scan_group_fast": "Schnelle Poll-Gruppe (Sekunden)",
+                    "scan_group_medium": "Mittlere Poll-Gruppe (Sekunden)",
+                    "scan_group_slow": "Langsame Poll-Gruppe (Sekunden)"
                 }
             },
             "inverter": {
@@ -518,6 +543,7 @@
                     "input_type": "Registertyp",
                     "data_type": "Datentyp",
                     "scan_interval": "Scan-Intervall (Sekunden)",
+                    "scan_group": "Poll-Gruppe (Schnell / Mittel / Langsam)",
                     "entity_category": "Entity-Kategorie",
                     "icon": "Icon",
                     "mm_group": "mm_group",
@@ -613,9 +639,10 @@
         "step": {
             "user": {
                 "title": "Gerät hinzufügen",
-                "description": "Dieses Gerät nutzt die Verbindung des Hubs. Wählen Sie Generisches Modbus-Gerät oder ein YAML-Template, danach Präfix und Slave-ID.",
+                "description": "Dieses Gerät nutzt die Verbindung des Hubs. Zuerst Kategorie (oder Generisches Modbus-Gerät), dann Hersteller und Modell, danach Präfix und Slave-ID.",
                 "data": {
                     "template": "Geräte-Template",
+                    "template_category": "Geräte-Kategorie",
                     "prefix": "Geräte-Prefix",
                     "slave_id": "Slave ID",
                     "selected_model": "Modell auswählen",
@@ -626,6 +653,13 @@
                     "heat_pump_enabled": "Wärmepumpen-Register aktivieren",
                     "pv2heat_enabled": "PV2Heat-Register aktivieren",
                     "heat_meter_enabled": "Wärmemengenzähler-Register aktivieren"
+                }
+            },
+            "template_pick": {
+                "title": "Template wählen",
+                "description": "Kategorie: {category}. Die Namen sind Hersteller und Modell.",
+                "data": {
+                    "template": "Hersteller — Modell"
                 }
             },
             "reconfigure": {
@@ -677,6 +711,7 @@
                     "input_type": "Registertyp",
                     "data_type": "Datentyp",
                     "scan_interval": "Scan-Intervall (Sekunden)",
+                    "scan_group": "Poll-Gruppe (Schnell / Mittel / Langsam)",
                     "entity_category": "Entity-Kategorie",
                     "icon": "Icon",
                     "mm_group": "mm_group",
@@ -748,9 +783,10 @@
             "step": {
                 "user": {
                     "title": "Gerät hinzufügen",
-                    "description": "Das Gerät hängt an dieser Hub-Verbindung (Host/Port oder seriell). Generisches Modbus-Gerät oder YAML-Template wählen, danach Präfix und Slave-ID.",
+                    "description": "Das Gerät hängt an dieser Hub-Verbindung. Zuerst Kategorie (oder Generisches Modbus-Gerät), dann Hersteller und Modell, danach Präfix und Slave-ID.",
                     "data": {
                         "template": "Geräte-Template",
+                        "template_category": "Geräte-Kategorie",
                         "prefix": "Geräte-Prefix",
                         "slave_id": "Slave ID",
                         "selected_model": "Modell auswählen",
@@ -761,6 +797,13 @@
                         "heat_pump_enabled": "Wärmepumpen-Register aktivieren",
                         "pv2heat_enabled": "PV2Heat-Register aktivieren",
                         "heat_meter_enabled": "Wärmemengenzähler-Register aktivieren"
+                    }
+                },
+                "template_pick": {
+                    "title": "Template wählen",
+                    "description": "Kategorie: {category}. Die Namen sind Hersteller und Modell.",
+                    "data": {
+                        "template": "Hersteller — Modell"
                     }
                 },
                 "reconfigure": {
@@ -812,6 +855,7 @@
                         "input_type": "Registertyp",
                         "data_type": "Datentyp",
                         "scan_interval": "Scan-Intervall (Sekunden)",
+                    "scan_group": "Poll-Gruppe (Schnell / Mittel / Langsam)",
                         "entity_category": "Entity-Kategorie",
                         "icon": "Icon",
                         "mm_group": "mm_group",
